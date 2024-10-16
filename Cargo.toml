@@ -1,0 +1,29 @@
+[package]
+name = "safetyhook"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+better_default = "1.0"
+log = { version = "0.4.22", features = [] }
+thiserror = "1.0"
+windows = { version = "0.58", features = [
+    "Win32_System_SystemServices",
+    "Win32_System_Memory",
+    "Win32_System_Diagnostics_Debug",
+    "Win32_System_SystemInformation",
+    "Win32_System_Kernel",
+] }
+zydis = "4.1.1"
+
+[dev-dependencies]
+env_logger = "0.11.5"
+
+[features]
+default = ["no_log"]
+no_log = ["log/max_level_off"]
+
+[[example]]
+name = "example-add"
+path = "examples/add.rs"
+
