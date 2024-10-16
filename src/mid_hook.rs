@@ -8,10 +8,23 @@ mod asm;
 
 #[derive(Debug, thiserror::Error)]
 pub enum MidError {
+    /// builder
+    #[error("Mid hook builder error: {0}")]
+    Builder(#[from] MidBuilderError),
     #[error("Bad allocation: {0}")]
     BadAllocation(#[from] AllocatorError),
     #[error("Bad inline hook: {0}")]
     BadInlineHook(#[from] InlineError),
+    #[error("Inline hook uninitialized")]
+    InlineHookUninitialized,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum MidBuilderError {
+    #[error("target should not be null")]
+    EmptyTarget,
+    #[error("destination should not be null")]
+    EmptyDestination,
 }
 
 #[repr(i32)]
@@ -22,12 +35,79 @@ pub enum Flags {
     StartDisabled = 1,
 }
 
+pub struct MidHookBuilder {
+    target: *mut u8,
+    destination: Option<MidHookFn>,
+    enable_after_setup: bool,
+    allocator: Option<SharedAllocator>,
+}
+
+impl Default for MidHookBuilder {
+    fn default() -> Self {
+        Self {
+            target: std::ptr::null_mut(),
+            destination: None,
+            allocator: None,
+            enable_after_setup: true,
+        }
+    }
+}
+
+impl MidHookBuilder {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn target(mut self, target: *mut u8) -> Self {
+        self.target = target;
+        self
+    }
+
+    pub fn destination(mut self, destination: MidHookFn) -> Self {
+        self.destination = Some(destination);
+        self
+    }
+
+    pub fn enable_after_setup(mut self, enable_after_setup: bool) -> Self {
+        self.enable_after_setup = enable_after_setup;
+        self
+    }
+
+    pub fn allocator(mut self, allocator: SharedAllocator) -> Self {
+        self.allocator = Some(allocator);
+        self
+    }
+
+    pub unsafe fn create(self) -> Result<MidHook, MidError> {
+        if self.target.is_null() {
+            return Err(MidBuilderError::EmptyTarget)?;
+        }
+        if self.destination.is_none() {
+            return Err(MidBuilderError::EmptyDestination)?;
+        }
+
+        let flags = if self.enable_after_setup {
+            Flags::Default
+        } else {
+            Flags::StartDisabled
+        };
+
+        if let Some(allocator) = self.allocator.clone() {
+            MidHook::new_with_allocator(allocator, self.target, self.destination.unwrap(), flags)
+        } else {
+            MidHook::new(self.target, self.destination.unwrap(), flags)
+        }
+    }
+}
+
 pub struct MidHook {
     hook: Option<InlineHook>,
     target: *mut u8,
     stub: Allocation,
     destination: MidHookFn,
 }
+
+unsafe impl Send for MidHook {}
 
 impl MidHook {
     pub unsafe fn new(
@@ -58,6 +138,26 @@ impl MidHook {
         }
 
         Ok(this)
+    }
+
+    pub fn target(&self) -> *mut u8 {
+        self.target
+    }
+
+    pub fn target_address(&self) -> usize {
+        self.target as usize
+    }
+
+    pub fn destination(&self) -> MidHookFn {
+        self.destination
+    }
+
+    pub fn original_bytes(&self) -> &[u8] {
+        self.hook.as_ref().unwrap().original_bytes()
+    }
+
+    pub fn enabled(&self) -> bool {
+        self.hook.as_ref().unwrap().enabled()
     }
 
     pub unsafe fn setup(&mut self, allocator: SharedAllocator) -> Result<(), MidError> {
@@ -111,30 +211,31 @@ impl MidHook {
         Ok(())
     }
 
-    pub unsafe fn enable(&mut self) -> Result<(), MidError> {
+    pub fn enable(&mut self) -> Result<(), MidError> {
         if self.hook.is_none() {
-            return Err(MidError::BadInlineHook(InlineError::Uninitialized));
+            return Err(MidError::InlineHookUninitialized);
         }
 
-        Ok(self.hook.as_mut().unwrap().enable()?)
+        unsafe { Ok(self.hook.as_mut().unwrap().enable()?) }
     }
 
-    pub unsafe fn disable(&mut self) -> Result<(), MidError> {
+    pub fn disable(&mut self) -> Result<(), MidError> {
         if self.hook.is_none() {
-            return Err(MidError::BadInlineHook(InlineError::Uninitialized));
+            return Err(MidError::InlineHookUninitialized);
         }
 
-        Ok(self.hook.as_mut().unwrap().disable()?)
+        unsafe { Ok(self.hook.as_mut().unwrap().disable()?) }
     }
 }
 
-pub type MidHookFn = extern "C" fn(*mut Context);
+pub type MidHookFn = unsafe extern "C" fn(*mut Context);
 
 #[cfg(target_arch = "x86_64")]
 pub type Context = Context64;
 #[cfg(target_arch = "x86")]
 pub type Context = Context32;
 
+#[cfg(target_arch = "x86_64")]
 #[repr(C)]
 pub struct Context64 {
     pub xmm0: Xmm,
@@ -174,6 +275,7 @@ pub struct Context64 {
     pub rip: usize,
 }
 
+#[cfg(target_arch = "x86")]
 #[repr(C)]
 pub struct Context32 {
     pub xmm0: Xmm,
@@ -198,10 +300,10 @@ pub struct Context32 {
 }
 
 pub union Xmm {
-    u8: [u8; 16],
-    u16: [u16; 8],
-    u32: [u32; 4],
-    u64: [u64; 2],
-    f32: [f32; 4],
-    f64: [f64; 2],
+    pub u8: [u8; 16],
+    pub u16: [u16; 8],
+    pub u32: [u32; 4],
+    pub u64: [u64; 2],
+    pub f32: [f32; 4],
+    pub f64: [f64; 2],
 }

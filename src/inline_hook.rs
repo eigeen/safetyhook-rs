@@ -14,14 +14,17 @@ use crate::{
 
 #[derive(Debug, thiserror::Error)]
 pub enum InlineError {
+    /// builder
+    #[error("Inline hook builder error: {0}")]
+    Builder(#[from] InlineBuilderError),
     #[error("Bad allocation: {0}")]
     BadAllocation(#[from] AllocatorError),
     #[error("No enough space")]
     NoEnoughSpace,
     #[error("Trampoline uninitialized")]
     TrampolineUninitialized,
-    #[error("InlineHook uninitialized")]
-    Uninitialized,
+    #[error("IP relative instruction out of range")]
+    IpRelativeInstructionOutOfRange,
 
     #[error("Empty instruction")]
     EmptyInstruction,
@@ -29,6 +32,12 @@ pub enum InlineError {
     Zydis(#[from] zydis::Status),
     #[error("Unsupported instruction in trampoline, ip = 0x{0:X}")]
     UnsupportedInstructionInTrampoline(usize),
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum InlineBuilderError {
+    #[error("address should not be null")]
+    EmptyAddress,
 }
 
 #[repr(packed)]
@@ -161,6 +170,68 @@ pub enum Flags {
     StartDisabled = 1 << 0,
 }
 
+pub struct InlineHookBuilder {
+    target: *mut u8,
+    destination: *const u8,
+    enable_after_setup: bool,
+    allocator: Option<SharedAllocator>,
+}
+
+impl Default for InlineHookBuilder {
+    fn default() -> Self {
+        Self {
+            target: std::ptr::null_mut(),
+            destination: std::ptr::null(),
+            enable_after_setup: true,
+            allocator: None,
+        }
+    }
+}
+
+impl InlineHookBuilder {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn target(mut self, target: *mut u8) -> Self {
+        self.target = target;
+        self
+    }
+
+    pub fn destination(mut self, destination: *const u8) -> Self {
+        self.destination = destination;
+        self
+    }
+
+    pub fn enable_after_setup(mut self, enable_after_setup: bool) -> Self {
+        self.enable_after_setup = enable_after_setup;
+        self
+    }
+
+    pub fn allocator(mut self, allocator: SharedAllocator) -> Self {
+        self.allocator = Some(allocator);
+        self
+    }
+
+    pub unsafe fn create(&self) -> Result<InlineHook, InlineError> {
+        if self.target.is_null() || self.destination.is_null() {
+            return Err(InlineBuilderError::EmptyAddress)?;
+        }
+
+        let flags = if self.enable_after_setup {
+            Flags::Default
+        } else {
+            Flags::StartDisabled
+        };
+
+        if let Some(allocator) = self.allocator.clone() {
+            InlineHook::new_with_allocator(allocator, self.target, self.destination, flags)
+        } else {
+            InlineHook::new(self.target, self.destination, flags)
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum JmpType {
     #[default]
@@ -180,16 +251,18 @@ pub struct InlineHook {
     jmp_type: JmpType,
 }
 
+unsafe impl Send for InlineHook {}
+
 impl Default for InlineHook {
     fn default() -> Self {
         Self {
             target: std::ptr::null_mut(),
-            destination: std::ptr::null_mut(),
+            destination: std::ptr::null(),
             trampoline: None,
-            original_bytes: Vec::new(),
+            original_bytes: Default::default(),
             trampoline_size: 0,
             enabled: false,
-            jmp_type: JmpType::Unset,
+            jmp_type: Default::default(),
         }
     }
 }
@@ -221,13 +294,25 @@ impl InlineHook {
     ) -> Result<Self, InlineError> {
         let mut this = Self::default();
 
-        this.setup(allocator, target, destination)?;
+        this.target = target;
+        this.destination = destination;
+
+        debug!(
+            "Setting up inline hook: target = {:p}, destination = {:p}",
+            target, destination
+        );
+
+        this.setup(allocator)?;
 
         if (flags as i32 & Flags::StartDisabled as i32) == 0 {
             this.enable()?;
         }
 
         Ok(this)
+    }
+
+    pub fn builder() -> InlineHookBuilder {
+        InlineHookBuilder::new()
     }
 
     pub fn target(&self) -> *mut u8 {
@@ -263,20 +348,7 @@ impl InlineHook {
     }
 
     #[allow(unused_assignments)]
-    pub unsafe fn setup(
-        &mut self,
-        allocator: SharedAllocator,
-        target: *mut u8,
-        destination: *const u8,
-    ) -> Result<(), InlineError> {
-        self.target = target;
-        self.destination = destination;
-
-        debug!(
-            "Setting up hook: target = {:p}, destination = {:p}",
-            target, destination
-        );
-
+    pub unsafe fn setup(&mut self, allocator: SharedAllocator) -> Result<(), InlineError> {
         let mut result: Result<(), InlineError> = Ok(());
         result = self.e9_hook(allocator.clone());
         #[cfg(target_arch = "x86_64")]
@@ -285,6 +357,87 @@ impl InlineHook {
         }
 
         result
+    }
+
+    pub unsafe fn enable(&mut self) -> Result<(), InlineError> {
+        if self.enabled {
+            return Ok(());
+        }
+
+        if self.trampoline.is_none() {
+            return Err(InlineError::TrampolineUninitialized);
+        }
+
+        // jmp from original to trampoline.
+        let mut error: Option<InlineError> = None;
+        VM::trap_threads(
+            self.target,
+            self.trampoline.as_ref().unwrap().data(),
+            self.original_bytes.len(),
+            Some(|| {
+                if self.jmp_type == JmpType::E9 {
+                    let trampoline_epilogue_ptr: *mut TrampolineEpilogueE9 =
+                        (self.trampoline.as_ref().unwrap().address() + self.trampoline_size
+                            - size_of::<TrampolineEpilogueE9>()) as *mut _;
+                    let trampoline_epilogue = trampoline_epilogue_ptr.as_ref().unwrap();
+
+                    if let Err(e) = emit_jmp_e9(
+                        self.target,
+                        addr_of!(trampoline_epilogue.jmp_to_destination) as _,
+                        Some(self.original_bytes.len()),
+                    ) {
+                        error = Some(e);
+                    };
+                }
+
+                #[cfg(target_arch = "x86_64")]
+                if self.jmp_type == JmpType::FF {
+                    if let Err(e) = emit_jmp_ff(
+                        self.target,
+                        self.destination,
+                        self.target.add(size_of::<JmpFF>()),
+                        Some(self.original_bytes.len()),
+                    ) {
+                        error = Some(e);
+                    };
+                }
+            }),
+        );
+
+        if let Some(e) = error {
+            return Err(e);
+        }
+
+        self.enabled = true;
+
+        Ok(())
+    }
+
+    pub unsafe fn disable(&mut self) -> Result<(), InlineError> {
+        if !self.enabled {
+            return Ok(());
+        }
+
+        if self.trampoline.is_none() {
+            return Err(InlineError::TrampolineUninitialized);
+        }
+
+        VM::trap_threads(
+            self.trampoline.as_ref().unwrap().data(),
+            self.target,
+            self.original_bytes.len(),
+            Some(|| {
+                std::ptr::copy_nonoverlapping(
+                    self.original_bytes.as_ptr(),
+                    self.target,
+                    self.original_bytes.len(),
+                );
+            }),
+        );
+
+        self.enabled = false;
+
+        Ok(())
     }
 
     unsafe fn e9_hook(&mut self, allocator: SharedAllocator) -> Result<(), InlineError> {
@@ -462,140 +615,59 @@ impl InlineHook {
         Ok(())
     }
 
-    pub fn ff_hook(&mut self, allocator: SharedAllocator) -> Result<(), InlineError> {
-        unimplemented!()
-    }
+    unsafe fn ff_hook(&mut self, allocator: SharedAllocator) -> Result<(), InlineError> {
+        self.original_bytes.clear();
+        self.trampoline_size = size_of::<TrampolineEpilogueFF>();
 
-    pub unsafe fn enable(&mut self) -> Result<(), InlineError> {
-        if self.enabled {
-            return Ok(());
+        let mut ip = self.target;
+        while ip < self.target.add(size_of::<JmpFF>()) {
+            let buffer = unsafe { std::slice::from_raw_parts(ip, 20) };
+            let ix = decode::<VisibleOperands>(buffer)?;
+
+            // We can't support any instruction that is IP relative here because
+            // ff_hook should only be called if e9_hook failed indicating that
+            // we're likely outside the +- 2GB range.
+            if ix.attributes & zydis::InstructionAttributes::IS_RELATIVE
+                != zydis::InstructionAttributes::empty()
+            {
+                return Err(InlineError::IpRelativeInstructionOutOfRange);
+            }
+
+            self.original_bytes
+                .extend_from_slice(&buffer[..ix.length as usize]);
+            self.trampoline_size += ix.length as usize;
+
+            ip = ip.add(ix.length as usize);
         }
 
-        if self.trampoline.is_none() {
-            return Err(InlineError::TrampolineUninitialized);
-        }
+        let trampoline_allocation = allocator.lock().unwrap().allocate(self.trampoline_size)?;
+        self.trampoline = Some(trampoline_allocation);
 
-        // jmp from original to trampoline.
-        let mut error: Option<InlineError> = None;
-        VM::trap_threads(
-            self.target,
+        std::ptr::copy_nonoverlapping(
+            self.original_bytes.as_ptr(),
             self.trampoline.as_ref().unwrap().data(),
             self.original_bytes.len(),
-            Some(|| {
-                if self.jmp_type == JmpType::E9 {
-                    let trampoline_epilogue_ptr: *mut TrampolineEpilogueE9 =
-                        (self.trampoline.as_ref().unwrap().address() + self.trampoline_size
-                            - size_of::<TrampolineEpilogueE9>()) as *mut _;
-                    let trampoline_epilogue = trampoline_epilogue_ptr.as_ref().unwrap();
-
-                    if let Err(e) = emit_jmp_e9(
-                        self.target,
-                        addr_of!(trampoline_epilogue.jmp_to_destination) as _,
-                        Some(self.original_bytes.len()),
-                    ) {
-                        error = Some(e);
-                    };
-                }
-
-                #[cfg(target_arch = "x86_64")]
-                if self.jmp_type == JmpType::FF {
-                    if let Err(e) = emit_jmp_ff(
-                        self.target,
-                        self.destination,
-                        self.target.add(size_of::<JmpFF>()),
-                        Some(self.original_bytes.len()),
-                    ) {
-                        error = Some(e);
-                    };
-                }
-            }),
         );
 
-        if let Some(e) = error {
-            return Err(e);
-        }
+        let trampoline_epilogue_ptr: *mut TrampolineEpilogueFF =
+            self.trampoline
+                .as_ref()
+                .unwrap()
+                .data()
+                .add(self.trampoline_size)
+                .sub(size_of::<TrampolineEpilogueFF>()) as _;
+        let trampoline_epilogue: &mut TrampolineEpilogueFF =
+            trampoline_epilogue_ptr.as_mut().unwrap();
 
-        self.enabled = true;
+        // jmp from trampoline to original.
+        let src: *mut u8 = addr_of_mut!(trampoline_epilogue.jmp_to_original) as _;
+        let dst: *const u8 = self.target.add(self.original_bytes.len());
+        let data: *mut u8 = addr_of_mut!(trampoline_epilogue.original_address) as _;
 
-        Ok(())
-    }
+        emit_jmp_ff(src, dst, data, None)?;
 
-    pub unsafe fn disable(&mut self) -> Result<(), InlineError> {
-        if !self.enabled {
-            return Ok(());
-        }
-
-        if self.trampoline.is_none() {
-            return Err(InlineError::TrampolineUninitialized);
-        }
-
-        VM::trap_threads(
-            self.trampoline.as_ref().unwrap().data(),
-            self.target,
-            self.original_bytes.len(),
-            Some(|| {
-                std::ptr::copy_nonoverlapping(
-                    self.original_bytes.as_ptr(),
-                    self.target,
-                    self.original_bytes.len(),
-                );
-            }),
-        );
-
-        self.enabled = false;
+        self.jmp_type = JmpType::FF;
 
         Ok(())
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use zydis::{Formatter, VisibleOperands};
-
-    #[test]
-    fn it_works() {
-        let decoder = if cfg!(target_arch = "x86_64") {
-            zydis::Decoder::new64()
-        } else {
-            zydis::Decoder::new32()
-        };
-
-        let buffer = [
-            0xFF, 0x35, 0x79, 0x01, 0x00, 0x00, 0x54, 0x54, 0x55, 0x50, 0x53, 0x51, 0x52, 0x56,
-            0x57, 0x41, 0x50, 0x41, 0x51, 0x41, 0x52, 0x41, 0x53, 0x41, 0x54, 0x41, 0x55, 0x41,
-            0x56, 0x41, 0x57, 0x9C, 0x48, 0x81, 0xEC, 0x00, 0x01, 0x00, 0x00, 0xF3, 0x44, 0x0F,
-            0x7F, 0xBC, 0x24, 0xF0, 0x00, 0x00, 0x00, 0xF3, 0x44, 0x0F, 0x7F, 0xB4, 0x24, 0xE0,
-            0x00, 0x00, 0x00, 0xF3, 0x44, 0x0F, 0x7F, 0xAC, 0x24, 0xD0, 0x00, 0x00, 0x00, 0xF3,
-            0x44, 0x0F, 0x7F, 0xA4, 0x24, 0xC0, 0x00, 0x00, 0x00, 0xF3, 0x44, 0x0F, 0x7F, 0x9C,
-            0x24, 0xB0, 0x00, 0x00, 0x00, 0xF3, 0x44, 0x0F, 0x7F, 0x94, 0x24, 0xA0, 0x00, 0x00,
-            0x00, 0xF3, 0x44, 0x0F, 0x7F, 0x8C, 0x24, 0x90, 0x00, 0x00, 0x00, 0xF3, 0x44, 0x0F,
-            0x7F, 0x84, 0x24, 0x80, 0x00, 0x00, 0x00, 0xF3, 0x0F, 0x7F, 0x7C, 0x24, 0x70, 0xF3,
-            0x0F, 0x7F, 0x74, 0x24, 0x60, 0xF3, 0x0F, 0x7F, 0x6C, 0x24, 0x50, 0xF3, 0x0F, 0x7F,
-            0x64, 0x24, 0x40, 0xF3, 0x0F, 0x7F, 0x5C, 0x24, 0x30, 0xF3, 0x0F, 0x7F, 0x54, 0x24,
-            0x20, 0xF3, 0x0F, 0x7F, 0x4C, 0x24, 0x10, 0xF3, 0x0F, 0x7F, 0x04, 0x24, 0x48, 0x8B,
-            0x8C, 0x24, 0x80, 0x01, 0x00, 0x00, 0x48, 0x83, 0xC1, 0x10, 0x48, 0x89, 0x8C, 0x24,
-            0x80, 0x01, 0x00, 0x00, 0x48, 0x8D, 0x0C, 0x24, 0x48, 0x89, 0xE3, 0x48, 0x83, 0xEC,
-            0x30, 0x48, 0x83, 0xE4, 0xF0, 0xFF, 0x15, 0xA8, 0x00, 0x00, 0x00, 0x48, 0x89, 0xDC,
-            0xF3, 0x0F, 0x6F, 0x04, 0x24, 0xF3, 0x0F, 0x6F, 0x4C, 0x24, 0x10, 0xF3, 0x0F, 0x6F,
-            0x54, 0x24, 0x20, 0xF3, 0x0F, 0x6F, 0x5C, 0x24, 0x30, 0xF3, 0x0F, 0x6F, 0x64, 0x24,
-            0x40, 0xF3, 0x0F, 0x6F, 0x6C, 0x24, 0x50, 0xF3, 0x0F, 0x6F, 0x74, 0x24, 0x60, 0xF3,
-            0x0F, 0x6F, 0x7C, 0x24, 0x70, 0xF3, 0x44, 0x0F, 0x6F, 0x84, 0x24, 0x80, 0x00, 0x00,
-            0x00, 0xF3, 0x44, 0x0F, 0x6F, 0x8C, 0x24, 0x90, 0x00, 0x00, 0x00, 0xF3, 0x44, 0x0F,
-            0x6F, 0x94, 0x24, 0xA0, 0x00, 0x00, 0x00, 0xF3, 0x44, 0x0F, 0x6F, 0x9C, 0x24, 0xB0,
-            0x00, 0x00, 0x00, 0xF3, 0x44, 0x0F, 0x6F, 0xA4, 0x24, 0xC0, 0x00, 0x00, 0x00, 0xF3,
-            0x44, 0x0F, 0x6F, 0xAC, 0x24, 0xD0, 0x00, 0x00, 0x00, 0xF3, 0x44, 0x0F, 0x6F, 0xB4,
-            0x24, 0xE0, 0x00, 0x00, 0x00, 0xF3, 0x44, 0x0F, 0x6F, 0xBC, 0x24, 0xF0, 0x00, 0x00,
-            0x00, 0x48, 0x81, 0xC4, 0x00, 0x01, 0x00, 0x00, 0x9D, 0x41, 0x5F, 0x41, 0x5E, 0x41,
-            0x5D, 0x41, 0x5C, 0x41, 0x5B, 0x41, 0x5A, 0x41, 0x59, 0x41, 0x58, 0x5F, 0x5E, 0x5A,
-            0x59, 0x5B, 0x58, 0x5D, 0x48, 0x8D, 0x64, 0x24, 0x08, 0x5C, 0xC3, 0x00, 0x00, 0x00,
-            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        ];
-        let fmt = Formatter::intel();
-        let instructions = decoder.decode_all::<VisibleOperands>(&buffer, 0);
-        for instruction in instructions {
-            // println!("{:?}", instruction.unwrap());
-            let (ip, _raw_bytes, insn) = instruction.unwrap();
-            println!("0x{:08X} {}", ip, fmt.format(Some(ip), &insn).unwrap())
-        }
     }
 }
