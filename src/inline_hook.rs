@@ -40,6 +40,7 @@ pub enum InlineBuilderError {
     EmptyAddress,
 }
 
+#[allow(unused)]
 #[repr(packed)]
 #[derive(Clone, Copy, Default)]
 struct JmpE9 {
@@ -48,6 +49,7 @@ struct JmpE9 {
     pub(crate) offset: u32,
 }
 
+#[allow(unused)]
 #[cfg(target_arch = "x86_64")]
 #[repr(packed)]
 #[derive(Clone, Copy, Default)]
@@ -193,13 +195,13 @@ impl InlineHookBuilder {
         Self::default()
     }
 
-    pub fn target(mut self, target: *mut u8) -> Self {
-        self.target = target;
+    pub fn target(mut self, target: *mut c_void) -> Self {
+        self.target = target as _;
         self
     }
 
-    pub fn destination(mut self, destination: *const u8) -> Self {
-        self.destination = destination;
+    pub fn destination(mut self, destination: *const c_void) -> Self {
+        self.destination = destination as _;
         self
     }
 
@@ -269,9 +271,7 @@ impl Default for InlineHook {
 
 impl Drop for InlineHook {
     fn drop(&mut self) {
-        unsafe {
-            let _ = self.disable();
-        }
+        let _ = self.disable();
     }
 }
 
@@ -359,7 +359,7 @@ impl InlineHook {
         result
     }
 
-    pub unsafe fn enable(&mut self) -> Result<(), InlineError> {
+    pub fn enable(&mut self) -> Result<(), InlineError> {
         if self.enabled {
             return Ok(());
         }
@@ -370,39 +370,42 @@ impl InlineHook {
 
         // jmp from original to trampoline.
         let mut error: Option<InlineError> = None;
-        VM::trap_threads(
-            self.target,
-            self.trampoline.as_ref().unwrap().data(),
-            self.original_bytes.len(),
-            Some(|| {
-                if self.jmp_type == JmpType::E9 {
-                    let trampoline_epilogue_ptr: *mut TrampolineEpilogueE9 =
-                        (self.trampoline.as_ref().unwrap().address() + self.trampoline_size
-                            - size_of::<TrampolineEpilogueE9>()) as *mut _;
-                    let trampoline_epilogue = trampoline_epilogue_ptr.as_ref().unwrap();
+        unsafe {
+            VM::trap_threads(
+                self.target,
+                self.trampoline.as_ref().unwrap().data(),
+                self.original_bytes.len(),
+                Some(|| {
+                    if self.jmp_type == JmpType::E9 {
+                        let trampoline_epilogue_ptr: *mut TrampolineEpilogueE9 =
+                            (self.trampoline.as_ref().unwrap().address() + self.trampoline_size
+                                - size_of::<TrampolineEpilogueE9>())
+                                as *mut _;
+                        let trampoline_epilogue = trampoline_epilogue_ptr.as_ref().unwrap();
 
-                    if let Err(e) = emit_jmp_e9(
-                        self.target,
-                        addr_of!(trampoline_epilogue.jmp_to_destination) as _,
-                        Some(self.original_bytes.len()),
-                    ) {
-                        error = Some(e);
-                    };
-                }
+                        if let Err(e) = emit_jmp_e9(
+                            self.target,
+                            addr_of!(trampoline_epilogue.jmp_to_destination) as _,
+                            Some(self.original_bytes.len()),
+                        ) {
+                            error = Some(e);
+                        };
+                    }
 
-                #[cfg(target_arch = "x86_64")]
-                if self.jmp_type == JmpType::FF {
-                    if let Err(e) = emit_jmp_ff(
-                        self.target,
-                        self.destination,
-                        self.target.add(size_of::<JmpFF>()),
-                        Some(self.original_bytes.len()),
-                    ) {
-                        error = Some(e);
-                    };
-                }
-            }),
-        );
+                    #[cfg(target_arch = "x86_64")]
+                    if self.jmp_type == JmpType::FF {
+                        if let Err(e) = emit_jmp_ff(
+                            self.target,
+                            self.destination,
+                            self.target.add(size_of::<JmpFF>()),
+                            Some(self.original_bytes.len()),
+                        ) {
+                            error = Some(e);
+                        };
+                    }
+                }),
+            );
+        }
 
         if let Some(e) = error {
             return Err(e);
@@ -413,7 +416,7 @@ impl InlineHook {
         Ok(())
     }
 
-    pub unsafe fn disable(&mut self) -> Result<(), InlineError> {
+    pub fn disable(&mut self) -> Result<(), InlineError> {
         if !self.enabled {
             return Ok(());
         }
@@ -422,18 +425,20 @@ impl InlineHook {
             return Err(InlineError::TrampolineUninitialized);
         }
 
-        VM::trap_threads(
-            self.trampoline.as_ref().unwrap().data(),
-            self.target,
-            self.original_bytes.len(),
-            Some(|| {
-                std::ptr::copy_nonoverlapping(
-                    self.original_bytes.as_ptr(),
-                    self.target,
-                    self.original_bytes.len(),
-                );
-            }),
-        );
+        unsafe {
+            VM::trap_threads(
+                self.trampoline.as_ref().unwrap().data(),
+                self.target,
+                self.original_bytes.len(),
+                Some(|| {
+                    std::ptr::copy_nonoverlapping(
+                        self.original_bytes.as_ptr(),
+                        self.target,
+                        self.original_bytes.len(),
+                    );
+                }),
+            );
+        }
 
         self.enabled = false;
 

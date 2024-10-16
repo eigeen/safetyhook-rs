@@ -1,3 +1,5 @@
+use std::ffi::c_void;
+
 use crate::{
     allocator::{Allocation, Allocator, AllocatorError, SharedAllocator},
     inline_hook::{self, InlineError, InlineHook},
@@ -58,8 +60,8 @@ impl MidHookBuilder {
         Self::default()
     }
 
-    pub fn target(mut self, target: *mut u8) -> Self {
-        self.target = target;
+    pub fn target(mut self, target: *mut c_void) -> Self {
+        self.target = target as _;
         self
     }
 
@@ -140,6 +142,10 @@ impl MidHook {
         Ok(this)
     }
 
+    pub fn builder() -> MidHookBuilder {
+        MidHookBuilder::new()
+    }
+
     pub fn target(&self) -> *mut u8 {
         self.target
     }
@@ -216,7 +222,7 @@ impl MidHook {
             return Err(MidError::InlineHookUninitialized);
         }
 
-        unsafe { Ok(self.hook.as_mut().unwrap().enable()?) }
+        Ok(self.hook.as_mut().unwrap().enable()?)
     }
 
     pub fn disable(&mut self) -> Result<(), MidError> {
@@ -224,7 +230,7 @@ impl MidHook {
             return Err(MidError::InlineHookUninitialized);
         }
 
-        unsafe { Ok(self.hook.as_mut().unwrap().disable()?) }
+        Ok(self.hook.as_mut().unwrap().disable()?)
     }
 }
 

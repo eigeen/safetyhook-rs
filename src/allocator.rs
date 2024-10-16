@@ -82,6 +82,7 @@ pub struct Allocator {
 }
 
 impl Allocator {
+    #[allow(clippy::arc_with_non_send_sync)]
     pub fn new_shared() -> Arc<Mutex<Self>> {
         let this = Arc::new(Mutex::new(Self {
             memory: Vec::new(),
