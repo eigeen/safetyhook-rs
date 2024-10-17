@@ -234,7 +234,7 @@ impl MidHook {
     }
 }
 
-pub type MidHookFn = unsafe extern "C" fn(*mut Context);
+pub type MidHookFn = unsafe extern "C" fn(&mut Context);
 
 #[cfg(target_arch = "x86_64")]
 pub type Context = Context64;

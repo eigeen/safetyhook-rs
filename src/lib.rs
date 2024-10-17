@@ -10,6 +10,7 @@ pub use mid_hook::MidHook;
 
 use std::ffi::c_void;
 
+/// Create a new inline hook, and enable after craetion.
 pub unsafe fn create_inline(
     target: *const c_void,
     dest: *const c_void,
@@ -17,6 +18,7 @@ pub unsafe fn create_inline(
     InlineHook::new(target as _, dest as _, inline_hook::Flags::Default)
 }
 
+/// Create a new mid hook, and enable after craetion.
 pub unsafe fn create_mid(
     target: *const c_void,
     dest: mid_hook::MidHookFn,

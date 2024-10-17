@@ -4,7 +4,7 @@ use std::{
 };
 
 use better_default::Default;
-use log::debug;
+use log::trace;
 use zydis::VisibleOperands;
 
 use crate::{
@@ -195,26 +195,39 @@ impl InlineHookBuilder {
         Self::default()
     }
 
+    /// **Required**
+    ///
+    /// Target address to hook.
     pub fn target(mut self, target: *mut c_void) -> Self {
         self.target = target as _;
         self
     }
 
+    /// **Required**
+    ///
+    /// Destination address to jump to.
     pub fn destination(mut self, destination: *const c_void) -> Self {
         self.destination = destination as _;
         self
     }
 
-    pub fn enable_after_setup(mut self, enable_after_setup: bool) -> Self {
-        self.enable_after_setup = enable_after_setup;
+    /// **Optional**: Default = true
+    ///
+    /// Enable immediately after setup.
+    pub fn enable_after_setup(mut self, enable: bool) -> Self {
+        self.enable_after_setup = enable;
         self
     }
 
+    /// **Optional**: Default = global allocator
+    ///
+    /// Allocator to use.
     pub fn allocator(mut self, allocator: SharedAllocator) -> Self {
         self.allocator = Some(allocator);
         self
     }
 
+    /// Create the inline hook.
     pub unsafe fn create(&self) -> Result<InlineHook, InlineError> {
         if self.target.is_null() || self.destination.is_null() {
             return Err(InlineBuilderError::EmptyAddress)?;
@@ -248,7 +261,6 @@ pub struct InlineHook {
     trampoline: Option<Allocation>,
     original_bytes: Vec<u8>,
     trampoline_size: usize,
-    // lock
     enabled: bool,
     jmp_type: JmpType,
 }
@@ -297,9 +309,10 @@ impl InlineHook {
         this.target = target;
         this.destination = destination;
 
-        debug!(
+        trace!(
             "Setting up inline hook: target = {:p}, destination = {:p}",
-            target, destination
+            target,
+            destination
         );
 
         this.setup(allocator)?;
@@ -446,7 +459,7 @@ impl InlineHook {
     }
 
     unsafe fn e9_hook(&mut self, allocator: SharedAllocator) -> Result<(), InlineError> {
-        debug!("Setting up E9 hook");
+        trace!("Setting up E9 hook");
 
         self.original_bytes.clear();
         self.trampoline_size = size_of::<TrampolineEpilogueE9>();
@@ -599,14 +612,14 @@ impl InlineHook {
         let src: *mut u8 = addr_of_mut!(trampoline_epilogue.jmp_to_original) as _;
         let dst: *mut u8 = self.target.add(self.original_bytes.len());
 
-        debug!("jmp from trampoline to original: {:p} -> {:p}", src, dst);
+        trace!("jmp from trampoline to original: {:p} -> {:p}", src, dst);
         emit_jmp_e9(src, dst, None)?;
 
         // jmp from trampoline to destination.
         let src: *mut u8 = addr_of_mut!(trampoline_epilogue.jmp_to_destination) as _;
         let dst: *mut u8 = self.destination as _;
 
-        debug!("jmp from trampoline to destination: {:p} -> {:p}", src, dst);
+        trace!("jmp from trampoline to destination: {:p} -> {:p}", src, dst);
         if cfg!(target_arch = "x86_64") {
             let data: *mut u8 = addr_of_mut!(trampoline_epilogue.destination_address) as _;
 
