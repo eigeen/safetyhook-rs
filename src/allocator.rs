@@ -65,15 +65,21 @@ impl Allocation {
 }
 
 pub struct Memory {
-    address: *const u8,
+    address: *mut u8,
     size: usize,
     freelist: Vec<FreeNode>,
 }
 
+impl Drop for Memory {
+    fn drop(&mut self) {
+        VM::free(self.address);
+    }
+}
+
 #[derive(Clone)]
 pub struct FreeNode {
-    start: *const u8,
-    end: *const u8,
+    start: *mut u8,
+    end: *mut u8,
 }
 
 pub struct Allocator {
@@ -161,7 +167,7 @@ impl Allocator {
         })
     }
 
-    pub fn free(&mut self, address: *const u8, size: usize) {
+    pub fn free(&mut self, address: *mut u8, size: usize) {
         for allocation in self.memory.iter_mut() {
             if allocation.address > address
                 || allocation.address.wrapping_add(allocation.size) < address

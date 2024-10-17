@@ -60,26 +60,39 @@ impl MidHookBuilder {
         Self::default()
     }
 
+    /// **Required**
+    ///
+    /// Target address to hook.
     pub fn target(mut self, target: *mut c_void) -> Self {
         self.target = target as _;
         self
     }
 
+    /// **Required**
+    ///
+    /// Destination address to jump to.
     pub fn destination(mut self, destination: MidHookFn) -> Self {
         self.destination = Some(destination);
         self
     }
 
+    /// **Optional**: Default = true
+    ///
+    /// Enable immediately after setup.
     pub fn enable_after_setup(mut self, enable_after_setup: bool) -> Self {
         self.enable_after_setup = enable_after_setup;
         self
     }
 
+    /// **Optional**: Default = global allocator
+    ///
+    /// Allocator to use.
     pub fn allocator(mut self, allocator: SharedAllocator) -> Self {
         self.allocator = Some(allocator);
         self
     }
 
+    /// Create a mid hook.
     pub unsafe fn create(self) -> Result<MidHook, MidError> {
         if self.target.is_null() {
             return Err(MidBuilderError::EmptyTarget)?;
@@ -112,6 +125,7 @@ pub struct MidHook {
 unsafe impl Send for MidHook {}
 
 impl MidHook {
+    /// Create a mid hook.
     pub unsafe fn new(
         target: *mut u8,
         destination: MidHookFn,
@@ -120,6 +134,7 @@ impl MidHook {
         Self::new_with_allocator(Allocator::global(), target, destination, flags)
     }
 
+    /// Create a inline hook with a custom allocator.
     pub unsafe fn new_with_allocator(
         allocator: SharedAllocator,
         target: *mut u8,
@@ -142,30 +157,37 @@ impl MidHook {
         Ok(this)
     }
 
+    /// Create a mid hook builder.
     pub fn builder() -> MidHookBuilder {
         MidHookBuilder::new()
     }
 
+    /// Target address to hook.
     pub fn target(&self) -> *mut u8 {
         self.target
     }
 
+    /// Target address to hook.
     pub fn target_address(&self) -> usize {
         self.target as usize
     }
 
+    /// Destination address to jump to.
     pub fn destination(&self) -> MidHookFn {
         self.destination
     }
 
+    /// Original backuped bytes.
     pub fn original_bytes(&self) -> &[u8] {
         self.hook.as_ref().unwrap().original_bytes()
     }
 
+    /// Is hook enabled.
     pub fn enabled(&self) -> bool {
         self.hook.as_ref().unwrap().enabled()
     }
 
+    /// Initialize hook.
     pub unsafe fn setup(&mut self, allocator: SharedAllocator) -> Result<(), MidError> {
         self.stub
             .data()
@@ -217,6 +239,7 @@ impl MidHook {
         Ok(())
     }
 
+    /// Enable hook.
     pub fn enable(&mut self) -> Result<(), MidError> {
         if self.hook.is_none() {
             return Err(MidError::InlineHookUninitialized);
@@ -225,6 +248,7 @@ impl MidHook {
         Ok(self.hook.as_mut().unwrap().enable()?)
     }
 
+    /// Disable hook.
     pub fn disable(&mut self) -> Result<(), MidError> {
         if self.hook.is_none() {
             return Err(MidError::InlineHookUninitialized);
@@ -234,6 +258,7 @@ impl MidHook {
     }
 }
 
+/// Mid hook callback function.
 pub type MidHookFn = unsafe extern "C" fn(&mut Context);
 
 #[cfg(target_arch = "x86_64")]

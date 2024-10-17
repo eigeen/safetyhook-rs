@@ -227,7 +227,7 @@ impl InlineHookBuilder {
         self
     }
 
-    /// Create the inline hook.
+    /// Create a inline hook.
     pub unsafe fn create(&self) -> Result<InlineHook, InlineError> {
         if self.target.is_null() || self.destination.is_null() {
             return Err(InlineBuilderError::EmptyAddress)?;
@@ -247,6 +247,7 @@ impl InlineHookBuilder {
     }
 }
 
+/// Type of JMP opcode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum JmpType {
     #[default]
@@ -288,6 +289,7 @@ impl Drop for InlineHook {
 }
 
 impl InlineHook {
+    /// Create a inline hook.
     pub unsafe fn new(
         target: *mut u8,
         destination: *const u8,
@@ -298,6 +300,7 @@ impl InlineHook {
         Self::new_with_allocator(allocator, target, destination, flags)
     }
 
+    /// Create a inline hook with a custom allocator.
     pub unsafe fn new_with_allocator(
         allocator: SharedAllocator,
         target: *mut u8,
@@ -324,54 +327,63 @@ impl InlineHook {
         Ok(this)
     }
 
+    /// Create a inline hook builder.
     pub fn builder() -> InlineHookBuilder {
         InlineHookBuilder::new()
     }
 
+    /// Target address to hook.
     pub fn target(&self) -> *mut u8 {
         self.target
     }
 
+    /// Target address to hook.
     pub fn target_address(&self) -> usize {
         self.target as usize
     }
 
+    /// Destination address to jump to.
     pub fn destination(&self) -> *const u8 {
         self.destination
     }
 
+    /// Destination address to jump to.
     pub fn destination_address(&self) -> usize {
         self.destination as usize
     }
 
+    /// Trampoline allocation.
     pub fn trampoline(&self) -> Option<&Allocation> {
         self.trampoline.as_ref()
     }
 
+    /// Is hook enabled.
     pub fn enabled(&self) -> bool {
         self.enabled
     }
 
+    /// Original function address.
+    ///
+    /// You can use this address to call the original function.
+    ///
+    /// Example:
+    ///
+    /// ```
+    /// // transmute ptr to function type.
+    /// let original: FuncType = std::mem::transmute(hook.original());
+    /// // call original function.
+    /// original(arg1, arg2, arg3);
+    /// ```
     pub fn original(&self) -> *const c_void {
         self.trampoline.as_ref().unwrap().data() as *const c_void
     }
 
+    /// Original backuped bytes.
     pub fn original_bytes(&self) -> &[u8] {
         &self.original_bytes
     }
 
-    #[allow(unused_assignments)]
-    pub unsafe fn setup(&mut self, allocator: SharedAllocator) -> Result<(), InlineError> {
-        let mut result: Result<(), InlineError> = Ok(());
-        result = self.e9_hook(allocator.clone());
-        #[cfg(target_arch = "x86_64")]
-        if result.is_err() {
-            result = self.ff_hook(allocator.clone());
-        }
-
-        result
-    }
-
+    /// Enable hook.
     pub fn enable(&mut self) -> Result<(), InlineError> {
         if self.enabled {
             return Ok(());
@@ -428,6 +440,7 @@ impl InlineHook {
         Ok(())
     }
 
+    /// Disable hook.
     pub fn disable(&mut self) -> Result<(), InlineError> {
         if !self.enabled {
             return Ok(());
@@ -457,6 +470,22 @@ impl InlineHook {
         Ok(())
     }
 
+    /// Initialize hook.
+    #[allow(unused_assignments)]
+    unsafe fn setup(&mut self, allocator: SharedAllocator) -> Result<(), InlineError> {
+        let mut result: Result<(), InlineError> = Ok(());
+        result = self.e9_hook(allocator.clone());
+        #[cfg(target_arch = "x86_64")]
+        if result.is_err() {
+            result = self.ff_hook(allocator.clone());
+        }
+
+        result
+    }
+
+    /// Initialize E9 JMP hook.
+    ///
+    /// Availble if targe <=> destination < 2^31 (2GB).
     unsafe fn e9_hook(&mut self, allocator: SharedAllocator) -> Result<(), InlineError> {
         trace!("Setting up E9 hook");
 
@@ -631,6 +660,10 @@ impl InlineHook {
         Ok(())
     }
 
+    /// Initialize FF JMP hook.
+    ///
+    /// Available in x86_64.
+    #[cfg(target_arch = "x86_64")]
     unsafe fn ff_hook(&mut self, allocator: SharedAllocator) -> Result<(), InlineError> {
         self.original_bytes.clear();
         self.trampoline_size = size_of::<TrampolineEpilogueFF>();
