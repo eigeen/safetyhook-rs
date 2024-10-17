@@ -390,11 +390,10 @@ impl InlineHook {
                 self.original_bytes.len(),
                 Some(|| {
                     if self.jmp_type == JmpType::E9 {
-                        let trampoline_epilogue_ptr: *mut TrampolineEpilogueE9 =
-                            (self.trampoline.as_ref().unwrap().address() + self.trampoline_size
-                                - size_of::<TrampolineEpilogueE9>())
-                                as *mut _;
-                        let trampoline_epilogue = trampoline_epilogue_ptr.as_ref().unwrap();
+                        let trampoline_epilogue: &mut TrampolineEpilogueE9 = std::mem::transmute(
+                            self.trampoline.as_ref().unwrap().address() + self.trampoline_size
+                                - size_of::<TrampolineEpilogueE9>(),
+                        );
 
                         if let Err(e) = emit_jmp_e9(
                             self.target,
@@ -603,10 +602,9 @@ impl InlineHook {
             ip = ip.add(ix.length as usize);
         }
 
-        let trampoline_epilogue_ptr: *mut TrampolineEpilogueE9 =
-            (m_trampoline.address() + self.trampoline_size - size_of::<TrampolineEpilogueE9>())
-                as _;
-        let trampoline_epilogue = trampoline_epilogue_ptr.as_mut().unwrap();
+        let trampoline_epilogue: &mut TrampolineEpilogueE9 = std::mem::transmute(
+            m_trampoline.address() + self.trampoline_size - size_of::<TrampolineEpilogueE9>(),
+        );
 
         // jmp from trampoline to original.
         let src: *mut u8 = addr_of_mut!(trampoline_epilogue.jmp_to_original) as _;
@@ -674,8 +672,7 @@ impl InlineHook {
                 .data()
                 .add(self.trampoline_size)
                 .sub(size_of::<TrampolineEpilogueFF>()) as _;
-        let trampoline_epilogue: &mut TrampolineEpilogueFF =
-            trampoline_epilogue_ptr.as_mut().unwrap();
+        let trampoline_epilogue = &mut *(trampoline_epilogue_ptr);
 
         // jmp from trampoline to original.
         let src: *mut u8 = addr_of_mut!(trampoline_epilogue.jmp_to_original) as _;
