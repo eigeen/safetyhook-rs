@@ -375,6 +375,5 @@ unsafe fn fix_ip(ctx: *mut CONTEXT, old_ip: *const u8, new_ip: *const u8) {
     ctx.as_mut().unwrap().Eip = ip as u32;
 }
 
-#[no_mangle]
 #[inline(never)]
 fn find_me() {}
