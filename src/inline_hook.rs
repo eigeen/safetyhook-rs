@@ -593,7 +593,9 @@ impl InlineHook {
                 let mut new_disp = target_address as isize - (tramp_ip as isize + 6);
 
                 // Handle the case where the target is now in the trampoline.
-                if target_address < self.target.add(self.original_bytes.len()) {
+                if target_address >= self.target
+                    && target_address < self.target.add(self.original_bytes.len())
+                {
                     new_disp = ix.raw.imm[0].value as isize
                 }
 
@@ -612,7 +614,9 @@ impl InlineHook {
                 let mut new_disp = target_address as isize - (tramp_ip as isize + 5);
 
                 // Handle the case where the target is now in the trampoline.
-                if target_address < self.target.add(self.original_bytes.len()) {
+                if target_address >= self.target
+                    && target_address < self.target.add(self.original_bytes.len())
+                {
                     new_disp = ix.raw.imm[0].value as isize
                 }
 
