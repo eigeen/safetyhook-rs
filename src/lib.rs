@@ -14,8 +14,8 @@ use std::ffi::c_void;
 ///
 /// It is a easy-to-use wrapper of [InlineHook::new] or [InlineHook::builder].
 pub unsafe fn create_inline(
-    target: *const c_void,
-    dest: *const c_void,
+    target: *mut c_void,
+    dest: *mut c_void,
 ) -> Result<InlineHook, inline_hook::InlineError> {
     InlineHook::new(target as _, dest as _, inline_hook::Flags::Default)
 }
@@ -24,7 +24,7 @@ pub unsafe fn create_inline(
 ///
 /// It is a easy-to-use wrapper of [MidHook::new] or [MidHook::builder].
 pub unsafe fn create_mid(
-    target: *const c_void,
+    target: *mut c_void,
     dest: mid_hook::MidHookFn,
 ) -> Result<MidHook, mid_hook::MidError> {
     MidHook::new(target as _, dest, mid_hook::Flags::Default)

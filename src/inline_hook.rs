@@ -174,7 +174,7 @@ pub enum Flags {
 
 pub struct InlineHookBuilder {
     target: *mut u8,
-    destination: *const u8,
+    destination: *mut u8,
     enable_after_setup: bool,
     allocator: Option<SharedAllocator>,
 }
@@ -183,7 +183,7 @@ impl Default for InlineHookBuilder {
     fn default() -> Self {
         Self {
             target: std::ptr::null_mut(),
-            destination: std::ptr::null(),
+            destination: std::ptr::null_mut(),
             enable_after_setup: true,
             allocator: None,
         }
@@ -206,7 +206,7 @@ impl InlineHookBuilder {
     /// **Required**
     ///
     /// Destination address to jump to.
-    pub fn destination(mut self, destination: *const c_void) -> Self {
+    pub fn destination(mut self, destination: *mut c_void) -> Self {
         self.destination = destination as _;
         self
     }
@@ -258,7 +258,7 @@ pub enum JmpType {
 
 pub struct InlineHook {
     target: *mut u8,
-    destination: *const u8,
+    destination: *mut u8,
     trampoline: Option<Allocation>,
     original_bytes: Vec<u8>,
     trampoline_size: usize,
@@ -272,7 +272,7 @@ impl Default for InlineHook {
     fn default() -> Self {
         Self {
             target: std::ptr::null_mut(),
-            destination: std::ptr::null(),
+            destination: std::ptr::null_mut(),
             trampoline: None,
             original_bytes: Default::default(),
             trampoline_size: 0,
@@ -292,7 +292,7 @@ impl InlineHook {
     /// Create a inline hook.
     pub unsafe fn new(
         target: *mut u8,
-        destination: *const u8,
+        destination: *mut u8,
         flags: Flags,
     ) -> Result<Self, InlineError> {
         let allocator = Allocator::global();
@@ -304,7 +304,7 @@ impl InlineHook {
     pub unsafe fn new_with_allocator(
         allocator: SharedAllocator,
         target: *mut u8,
-        destination: *const u8,
+        destination: *mut u8,
         flags: Flags,
     ) -> Result<Self, InlineError> {
         let mut this = Self::default();
@@ -343,7 +343,7 @@ impl InlineHook {
     }
 
     /// Destination address to jump to.
-    pub fn destination(&self) -> *const u8 {
+    pub fn destination(&self) -> *mut u8 {
         self.destination
     }
 
