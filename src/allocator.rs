@@ -82,8 +82,13 @@ pub struct FreeNode {
     end: *mut u8,
 }
 
-pub struct Allocator {
+#[derive(Default)]
+struct AllocatorInner {
     memory: Vec<Memory>,
+}
+
+pub struct Allocator {
+    inner: Mutex<AllocatorInner>,
     self_weak: Weak<Mutex<Self>>,
 }
 
@@ -91,7 +96,7 @@ impl Allocator {
     #[allow(clippy::arc_with_non_send_sync)]
     pub fn new_shared() -> Arc<Mutex<Self>> {
         let this = Arc::new(Mutex::new(Self {
-            memory: Vec::new(),
+            inner: Default::default(),
             self_weak: Weak::new(),
         }));
         this.lock().unwrap().self_weak = Arc::downgrade(&this);
@@ -111,18 +116,20 @@ impl Allocator {
         }
     }
 
-    pub fn allocate(&mut self, size: usize) -> Result<Allocation> {
+    pub fn allocate(&self, size: usize) -> Result<Allocation> {
         self.allocate_near(&[], size, None)
     }
 
     pub fn allocate_near(
-        &mut self,
+        &self,
         desired_addresses: &[*mut u8],
         size: usize,
         max_distance: Option<usize>,
     ) -> Result<Allocation> {
+        let mut inner = self.inner.lock().unwrap();
+
         let max_distance = max_distance.unwrap_or(usize::MAX);
-        for allocation in self.memory.iter_mut() {
+        for allocation in inner.memory.iter_mut() {
             if allocation.size < size {
                 continue;
             }
@@ -158,7 +165,7 @@ impl Allocator {
                 end: allocation_address.wrapping_add(allocation_size),
             }],
         };
-        self.memory.push(memory);
+        inner.memory.push(memory);
 
         Ok(Allocation {
             allocator: self.self_weak.upgrade().unwrap(),
@@ -167,8 +174,10 @@ impl Allocator {
         })
     }
 
-    pub fn free(&mut self, address: *mut u8, size: usize) {
-        for allocation in self.memory.iter_mut() {
+    pub fn free(&self, address: *mut u8, size: usize) {
+        let mut inner = self.inner.lock().unwrap();
+
+        for allocation in inner.memory.iter_mut() {
             if allocation.address > address
                 || allocation.address.wrapping_add(allocation.size) < address
             {
