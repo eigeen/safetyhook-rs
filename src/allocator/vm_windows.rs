@@ -234,6 +234,9 @@ impl VM {
             trap_manager.add_trap(from, to, len);
         }
 
+        // Make sure we aren't working on a different address in the same memory page on a different thread.
+        let _lock = VIRTUAL_PROTECT_MUTEX.lock().unwrap();
+
         let mut from_protect = PAGE_PROTECTION_FLAGS::default();
         let mut to_protect = PAGE_PROTECTION_FLAGS::default();
 
@@ -252,6 +255,7 @@ impl VM {
 static TRAP_MANAGER: LazyLock<Mutex<TrapManager>> =
     LazyLock::new(|| Mutex::new(unsafe { TrapManager::new() }));
 static TRAP_MANAGER_DESTRUCTED: AtomicBool = AtomicBool::new(false);
+static VIRTUAL_PROTECT_MUTEX: Mutex<()> = Mutex::new(());
 
 struct TrapInfo {
     from_page_start: *const u8,
