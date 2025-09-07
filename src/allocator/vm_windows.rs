@@ -1,7 +1,10 @@
 use std::{
     collections::HashMap,
     ffi::c_void,
-    sync::{LazyLock, Mutex},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        LazyLock, Mutex,
+    },
 };
 
 use windows::{
@@ -225,8 +228,11 @@ impl VM {
             log::warn!("Failed to get VirtualProtect address");
         }
 
-        let mut trap_manager = TrapManager::instance().lock().unwrap();
-        trap_manager.add_trap(from, to, len);
+        if !TRAP_MANAGER_DESTRUCTED.load(Ordering::SeqCst) {
+            // not destructed
+            let mut trap_manager = TrapManager::instance().lock().unwrap();
+            trap_manager.add_trap(from, to, len);
+        }
 
         let mut from_protect = PAGE_PROTECTION_FLAGS::default();
         let mut to_protect = PAGE_PROTECTION_FLAGS::default();
@@ -245,6 +251,7 @@ impl VM {
 
 static TRAP_MANAGER: LazyLock<Mutex<TrapManager>> =
     LazyLock::new(|| Mutex::new(unsafe { TrapManager::new() }));
+static TRAP_MANAGER_DESTRUCTED: AtomicBool = AtomicBool::new(false);
 
 struct TrapInfo {
     from_page_start: *const u8,
@@ -270,11 +277,12 @@ impl Drop for TrapManager {
                 RemoveVectoredExceptionHandler(self.trap_veh);
             }
         }
+        TRAP_MANAGER_DESTRUCTED.store(true, Ordering::SeqCst);
     }
 }
 
 impl TrapManager {
-    pub unsafe fn new() -> Self {
+    unsafe fn new() -> Self {
         Self {
             traps: HashMap::new(),
             trap_veh: AddVectoredExceptionHandler(1, Some(trap_handler)),
