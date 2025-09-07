@@ -1,8 +1,10 @@
 pub unsafe fn store<T: Copy>(address: *mut u8, value: T) {
-    let size = size_of::<T>();
+    unsafe {
+        let size = size_of::<T>();
 
-    let value_bytes = std::slice::from_raw_parts(&value as *const T as *const u8, size);
-    std::ptr::copy_nonoverlapping(value_bytes.as_ptr(), address, size);
+        let value_bytes = std::slice::from_raw_parts(&value as *const T as *const u8, size);
+        std::ptr::copy_nonoverlapping(value_bytes.as_ptr(), address, size);
+    }
 }
 
 pub fn align_up(address: usize, align: usize) -> usize {

@@ -41,7 +41,7 @@ pub enum InlineBuilderError {
 }
 
 #[allow(unused)]
-#[repr(packed)]
+#[repr(C, packed)]
 #[derive(Clone, Copy, Default)]
 struct JmpE9 {
     #[default(0xE9)]
@@ -51,7 +51,7 @@ struct JmpE9 {
 
 #[allow(unused)]
 #[cfg(target_arch = "x86_64")]
-#[repr(packed)]
+#[repr(C, packed)]
 #[derive(Clone, Copy, Default)]
 struct JmpFF {
     #[default(0xFF)]
@@ -62,7 +62,7 @@ struct JmpFF {
 }
 
 #[cfg(target_arch = "x86_64")]
-#[repr(packed)]
+#[repr(C, packed)]
 #[derive(Default)]
 struct TrampolineEpilogueE9 {
     jmp_to_original: JmpE9,
@@ -71,7 +71,7 @@ struct TrampolineEpilogueE9 {
 }
 
 #[cfg(target_arch = "x86_64")]
-#[repr(packed)]
+#[repr(C, packed)]
 #[derive(Default)]
 struct TrampolineEpilogueFF {
     jmp_to_original: JmpFF,
@@ -79,7 +79,7 @@ struct TrampolineEpilogueFF {
 }
 
 #[cfg(target_arch = "x86")]
-#[repr(packed)]
+#[repr(C, packed)]
 #[derive(Default)]
 struct TrampolineEpilogueE9 {
     jmp_to_original: JmpE9,
@@ -91,7 +91,9 @@ unsafe fn make_jmp_ff(src: *const u8, dst: *const u8, data: *mut u8) -> JmpFF {
         offset: (data as usize - src as usize - size_of::<JmpFF>()) as u32,
         ..Default::default()
     };
-    utility::store(data, dst);
+    unsafe {
+        utility::store(data, dst);
+    }
 
     jmp_ff
 }
@@ -114,7 +116,9 @@ unsafe fn emit_jmp_ff(
         }
     }
 
-    utility::store(src, make_jmp_ff(src, dst, data));
+    unsafe {
+        utility::store(src, make_jmp_ff(src, dst, data));
+    }
 
     Ok(())
 }
@@ -133,19 +137,21 @@ unsafe fn emit_jmp_e9(
     dst: *const u8,
     size: Option<usize>,
 ) -> Result<(), InlineError> {
-    const SIZE: usize = size_of::<JmpE9>();
+    unsafe {
+        const SIZE: usize = size_of::<JmpE9>();
 
-    let size = size.unwrap_or(SIZE);
-    if size < SIZE {
-        return Err(InlineError::NoEnoughSpace);
+        let size = size.unwrap_or(SIZE);
+        if size < SIZE {
+            return Err(InlineError::NoEnoughSpace);
+        }
+        if size > SIZE {
+            std::ptr::write_bytes(src, 0x90_u8, size);
+        }
+
+        utility::store(src, make_jmp_e9(src, dst));
+
+        Ok(())
     }
-    if size > SIZE {
-        std::ptr::write_bytes(src, 0x90_u8, size);
-    }
-
-    utility::store(src, make_jmp_e9(src, dst));
-
-    Ok(())
 }
 
 fn decode<O: zydis::Operands>(ip: &[u8]) -> Result<zydis::Instruction<O>, InlineError> {
@@ -239,10 +245,12 @@ impl InlineHookBuilder {
             Flags::StartDisabled
         };
 
-        if let Some(allocator) = self.allocator.clone() {
-            InlineHook::new_with_allocator(allocator, self.target, self.destination, flags)
-        } else {
-            InlineHook::new(self.target, self.destination, flags)
+        unsafe {
+            if let Some(allocator) = self.allocator.clone() {
+                InlineHook::new_with_allocator(allocator, self.target, self.destination, flags)
+            } else {
+                InlineHook::new(self.target, self.destination, flags)
+            }
         }
     }
 }
@@ -297,7 +305,7 @@ impl InlineHook {
     ) -> Result<Self, InlineError> {
         let allocator = Allocator::global();
 
-        Self::new_with_allocator(allocator, target, destination, flags)
+        unsafe { Self::new_with_allocator(allocator, target, destination, flags) }
     }
 
     /// Create a inline hook with a custom allocator.
@@ -314,11 +322,12 @@ impl InlineHook {
 
         trace!(
             "Setting up inline hook: target = {:p}, destination = {:p}",
-            target,
-            destination
+            target, destination
         );
 
-        this.setup(allocator)?;
+        unsafe {
+            this.setup(allocator)?;
+        }
 
         if (flags as i32 & Flags::StartDisabled as i32) == 0 {
             this.enable()?;
@@ -417,16 +426,16 @@ impl InlineHook {
                     }
 
                     #[cfg(target_arch = "x86_64")]
-                    if self.jmp_type == JmpType::FF {
-                        if let Err(e) = emit_jmp_ff(
+                    if self.jmp_type == JmpType::FF
+                        && let Err(e) = emit_jmp_ff(
                             self.target,
                             self.destination,
                             self.target.add(size_of::<JmpFF>()),
                             Some(self.original_bytes.len()),
-                        ) {
-                            error = Some(e);
-                        };
-                    }
+                        )
+                    {
+                        error = Some(e);
+                    };
                 }),
             );
         }
@@ -473,195 +482,191 @@ impl InlineHook {
     /// Initialize hook.
     #[allow(unused_assignments)]
     unsafe fn setup(&mut self, allocator: SharedAllocator) -> Result<(), InlineError> {
-        let mut result: Result<(), InlineError> = Ok(());
-        result = self.e9_hook(allocator.clone());
-        #[cfg(target_arch = "x86_64")]
-        if result.is_err() {
-            result = self.ff_hook(allocator.clone());
-        }
+        unsafe {
+            let mut result: Result<(), InlineError> = Ok(());
+            result = self.e9_hook(allocator.clone());
+            #[cfg(target_arch = "x86_64")]
+            if result.is_err() {
+                result = self.ff_hook(allocator.clone());
+            }
 
-        result
+            result
+        }
     }
 
     /// Initialize E9 JMP hook.
     ///
     /// Availble if targe <=> destination < 2^31 (2GB).
     unsafe fn e9_hook(&mut self, allocator: SharedAllocator) -> Result<(), InlineError> {
-        trace!("Setting up E9 hook");
+        unsafe {
+            trace!("Setting up E9 hook");
 
-        self.original_bytes.clear();
-        self.trampoline_size = size_of::<TrampolineEpilogueE9>();
+            self.original_bytes.clear();
+            self.trampoline_size = size_of::<TrampolineEpilogueE9>();
 
-        let mut desired_addresses = vec![self.target];
+            let mut desired_addresses = vec![self.target];
 
-        let mut ip = self.target;
-        while ip < self.target.add(size_of::<JmpE9>()) {
-            let buffer = unsafe { std::slice::from_raw_parts(ip, 20) };
-            let ix = decode::<VisibleOperands>(buffer)?;
+            let mut ip = self.target;
+            while ip < self.target.add(size_of::<JmpE9>()) {
+                let buffer = std::slice::from_raw_parts(ip, 20);
+                let ix = decode::<VisibleOperands>(buffer)?;
 
-            self.trampoline_size += ix.length as usize;
-            self.original_bytes
-                .extend_from_slice(&buffer[..ix.length as usize]);
+                self.trampoline_size += ix.length as usize;
+                self.original_bytes
+                    .extend_from_slice(&buffer[..ix.length as usize]);
 
-            let is_relative = (ix.attributes & zydis::InstructionAttributes::IS_RELATIVE)
-                != zydis::InstructionAttributes::empty();
+                let is_relative = (ix.attributes & zydis::InstructionAttributes::IS_RELATIVE)
+                    != zydis::InstructionAttributes::empty();
 
-            if is_relative {
-                if ix.raw.disp.size == 32 {
+                if is_relative {
+                    if ix.raw.disp.size == 32 {
+                        let target_address = ip
+                            .add(ix.length as usize)
+                            .offset(ix.raw.disp.value as isize);
+                        desired_addresses.push(target_address);
+                    } else if ix.raw.imm[0].size == 32 {
+                        let target_address = ip
+                            .add(ix.length as usize)
+                            .offset(ix.raw.imm[0].value as isize);
+                        desired_addresses.push(target_address);
+                    } else if ix.meta.category == zydis::InstructionCategory::COND_BR
+                        && ix.meta.branch_type == zydis::BranchType::SHORT
+                    {
+                        let target_address = ip
+                            .add(ix.length as usize)
+                            .offset(ix.raw.imm[0].value as isize);
+                        desired_addresses.push(target_address);
+                        self.trampoline_size += 4; // near conditional branches are 4 bytes larger.
+                    } else if ix.meta.category == zydis::InstructionCategory::UNCOND_BR
+                        && ix.meta.branch_type == zydis::BranchType::SHORT
+                    {
+                        let target_address = ip
+                            .add(ix.length as usize)
+                            .offset(ix.raw.imm[0].value as isize);
+                        desired_addresses.push(target_address);
+                        self.trampoline_size += 3; // near unconditional branches are 3 bytes larger.
+                    } else {
+                        return Err(InlineError::UnsupportedInstructionInTrampoline(ip as usize));
+                    }
+                }
+
+                ip = ip.add(ix.length as usize);
+            }
+
+            let trampoline_allocation = allocator.lock().unwrap().allocate_near(
+                &desired_addresses,
+                self.trampoline_size,
+                None,
+            )?;
+            self.trampoline = Some(trampoline_allocation);
+            let m_trampoline = self.trampoline.as_mut().unwrap();
+
+            let mut ip = self.target;
+            let mut tramp_ip = m_trampoline.data();
+            while ip < self.target.add(self.original_bytes.len()) {
+                let buffer = std::slice::from_raw_parts(ip, 20);
+                let ix = match decode::<VisibleOperands>(buffer) {
+                    Ok(ix) => ix,
+                    Err(e) => {
+                        self.trampoline = None;
+                        return Err(e);
+                    }
+                };
+
+                let is_relative = (ix.attributes & zydis::InstructionAttributes::IS_RELATIVE)
+                    != zydis::InstructionAttributes::empty();
+
+                if is_relative && ix.raw.disp.size == 32 {
+                    std::ptr::copy_nonoverlapping(ip, tramp_ip, ix.length as usize);
                     let target_address = ip
                         .add(ix.length as usize)
                         .offset(ix.raw.disp.value as isize);
-                    desired_addresses.push(target_address);
-                } else if ix.raw.imm[0].size == 32 {
+                    let new_disp =
+                        target_address as isize - (tramp_ip as isize + ix.length as isize);
+                    utility::store(tramp_ip.add(ix.raw.disp.offset as usize), new_disp as i32);
+                    tramp_ip = tramp_ip.add(ix.length as usize);
+                } else if is_relative && ix.raw.imm[0].size == 32 {
+                    std::ptr::copy_nonoverlapping(ip, tramp_ip, ix.length as usize);
                     let target_address = ip
                         .add(ix.length as usize)
                         .offset(ix.raw.imm[0].value as isize);
-                    desired_addresses.push(target_address);
+                    let new_disp =
+                        target_address as isize - (tramp_ip as isize + ix.length as isize);
+                    utility::store(tramp_ip.add(ix.raw.imm[0].offset as usize), new_disp as i32);
+                    tramp_ip = tramp_ip.add(ix.length as usize);
                 } else if ix.meta.category == zydis::InstructionCategory::COND_BR
                     && ix.meta.branch_type == zydis::BranchType::SHORT
                 {
                     let target_address = ip
                         .add(ix.length as usize)
                         .offset(ix.raw.imm[0].value as isize);
-                    desired_addresses.push(target_address);
-                    self.trampoline_size += 4; // near conditional branches are 4 bytes larger.
+                    let mut new_disp = target_address as isize - (tramp_ip as isize + 6);
+
+                    // Handle the case where the target is now in the trampoline.
+                    if target_address >= self.target
+                        && target_address < self.target.add(self.original_bytes.len())
+                    {
+                        new_disp = ix.raw.imm[0].value as isize
+                    }
+
+                    tramp_ip.write(0x0F);
+                    tramp_ip.add(1).write(0x10 + ix.opcode);
+                    utility::store(tramp_ip.add(2), new_disp as i32);
+                    tramp_ip = tramp_ip.add(6);
                 } else if ix.meta.category == zydis::InstructionCategory::UNCOND_BR
                     && ix.meta.branch_type == zydis::BranchType::SHORT
                 {
                     let target_address = ip
                         .add(ix.length as usize)
                         .offset(ix.raw.imm[0].value as isize);
-                    desired_addresses.push(target_address);
-                    self.trampoline_size += 3; // near unconditional branches are 3 bytes larger.
-                } else {
-                    return Err(InlineError::UnsupportedInstructionInTrampoline(ip as usize));
-                }
-            }
+                    let mut new_disp = target_address as isize - (tramp_ip as isize + 5);
 
-            ip = ip.add(ix.length as usize);
-        }
+                    // Handle the case where the target is now in the trampoline.
+                    if target_address >= self.target
+                        && target_address < self.target.add(self.original_bytes.len())
+                    {
+                        new_disp = ix.raw.imm[0].value as isize
+                    }
 
-        let trampoline_allocation = allocator.lock().unwrap().allocate_near(
-            &desired_addresses,
-            self.trampoline_size,
-            None,
-        )?;
-        self.trampoline = Some(trampoline_allocation);
-        let m_trampoline = self.trampoline.as_mut().unwrap();
-
-        let mut ip = self.target;
-        let mut tramp_ip = m_trampoline.data();
-        while ip < self.target.add(self.original_bytes.len()) {
-            let buffer = unsafe { std::slice::from_raw_parts(ip, 20) };
-            let ix = match decode::<VisibleOperands>(buffer) {
-                Ok(ix) => ix,
-                Err(e) => {
-                    self.trampoline = None;
-                    return Err(e);
-                }
-            };
-
-            let is_relative = (ix.attributes & zydis::InstructionAttributes::IS_RELATIVE)
-                != zydis::InstructionAttributes::empty();
-
-            if is_relative && ix.raw.disp.size == 32 {
-                unsafe {
-                    std::ptr::copy_nonoverlapping(ip, tramp_ip, ix.length as usize);
-                };
-                let target_address = ip
-                    .add(ix.length as usize)
-                    .offset(ix.raw.disp.value as isize);
-                let new_disp = target_address as isize - (tramp_ip as isize + ix.length as isize);
-                utility::store(tramp_ip.add(ix.raw.disp.offset as usize), new_disp as i32);
-                tramp_ip = tramp_ip.add(ix.length as usize);
-            } else if is_relative && ix.raw.imm[0].size == 32 {
-                unsafe {
-                    std::ptr::copy_nonoverlapping(ip, tramp_ip, ix.length as usize);
-                };
-                let target_address = ip
-                    .add(ix.length as usize)
-                    .offset(ix.raw.imm[0].value as isize);
-                let new_disp = target_address as isize - (tramp_ip as isize + ix.length as isize);
-                utility::store(tramp_ip.add(ix.raw.imm[0].offset as usize), new_disp as i32);
-                tramp_ip = tramp_ip.add(ix.length as usize);
-            } else if ix.meta.category == zydis::InstructionCategory::COND_BR
-                && ix.meta.branch_type == zydis::BranchType::SHORT
-            {
-                let target_address = ip
-                    .add(ix.length as usize)
-                    .offset(ix.raw.imm[0].value as isize);
-                let mut new_disp = target_address as isize - (tramp_ip as isize + 6);
-
-                // Handle the case where the target is now in the trampoline.
-                if target_address >= self.target
-                    && target_address < self.target.add(self.original_bytes.len())
-                {
-                    new_disp = ix.raw.imm[0].value as isize
-                }
-
-                unsafe {
-                    tramp_ip.write(0x0F);
-                    tramp_ip.add(1).write(0x10 + ix.opcode);
-                    utility::store(tramp_ip.add(2), new_disp as i32);
-                }
-                tramp_ip = tramp_ip.add(6);
-            } else if ix.meta.category == zydis::InstructionCategory::UNCOND_BR
-                && ix.meta.branch_type == zydis::BranchType::SHORT
-            {
-                let target_address = ip
-                    .add(ix.length as usize)
-                    .offset(ix.raw.imm[0].value as isize);
-                let mut new_disp = target_address as isize - (tramp_ip as isize + 5);
-
-                // Handle the case where the target is now in the trampoline.
-                if target_address >= self.target
-                    && target_address < self.target.add(self.original_bytes.len())
-                {
-                    new_disp = ix.raw.imm[0].value as isize
-                }
-
-                unsafe {
                     tramp_ip.write(0xE9);
                     utility::store(tramp_ip.add(1), new_disp as i32);
-                }
-                tramp_ip = tramp_ip.add(5);
-            } else {
-                unsafe {
+                    tramp_ip = tramp_ip.add(5);
+                } else {
                     std::ptr::copy_nonoverlapping(ip, tramp_ip, ix.length as usize);
+                    tramp_ip = tramp_ip.add(ix.length as usize);
                 }
-                tramp_ip = tramp_ip.add(ix.length as usize);
+
+                ip = ip.add(ix.length as usize);
             }
 
-            ip = ip.add(ix.length as usize);
-        }
+            let trampoline_epilogue: &mut TrampolineEpilogueE9 = std::mem::transmute(
+                m_trampoline.address() + self.trampoline_size - size_of::<TrampolineEpilogueE9>(),
+            );
 
-        let trampoline_epilogue: &mut TrampolineEpilogueE9 = std::mem::transmute(
-            m_trampoline.address() + self.trampoline_size - size_of::<TrampolineEpilogueE9>(),
-        );
+            // jmp from trampoline to original.
+            let src: *mut u8 = addr_of_mut!(trampoline_epilogue.jmp_to_original) as _;
+            let dst: *mut u8 = self.target.add(self.original_bytes.len());
 
-        // jmp from trampoline to original.
-        let src: *mut u8 = addr_of_mut!(trampoline_epilogue.jmp_to_original) as _;
-        let dst: *mut u8 = self.target.add(self.original_bytes.len());
-
-        trace!("jmp from trampoline to original: {:p} -> {:p}", src, dst);
-        emit_jmp_e9(src, dst, None)?;
-
-        // jmp from trampoline to destination.
-        let src: *mut u8 = addr_of_mut!(trampoline_epilogue.jmp_to_destination) as _;
-        let dst: *mut u8 = self.destination as _;
-
-        trace!("jmp from trampoline to destination: {:p} -> {:p}", src, dst);
-        if cfg!(target_arch = "x86_64") {
-            let data: *mut u8 = addr_of_mut!(trampoline_epilogue.destination_address) as _;
-
-            emit_jmp_ff(src, dst, data, None)?;
-        } else {
+            trace!("jmp from trampoline to original: {:p} -> {:p}", src, dst);
             emit_jmp_e9(src, dst, None)?;
+
+            // jmp from trampoline to destination.
+            let src: *mut u8 = addr_of_mut!(trampoline_epilogue.jmp_to_destination) as _;
+            let dst: *mut u8 = self.destination as _;
+
+            trace!("jmp from trampoline to destination: {:p} -> {:p}", src, dst);
+            if cfg!(target_arch = "x86_64") {
+                let data: *mut u8 = addr_of_mut!(trampoline_epilogue.destination_address) as _;
+
+                emit_jmp_ff(src, dst, data, None)?;
+            } else {
+                emit_jmp_e9(src, dst, None)?;
+            }
+
+            self.jmp_type = JmpType::E9;
+
+            Ok(())
         }
-
-        self.jmp_type = JmpType::E9;
-
-        Ok(())
     }
 
     /// Initialize FF JMP hook.
@@ -669,57 +674,59 @@ impl InlineHook {
     /// Available in x86_64.
     #[cfg(target_arch = "x86_64")]
     unsafe fn ff_hook(&mut self, allocator: SharedAllocator) -> Result<(), InlineError> {
-        self.original_bytes.clear();
-        self.trampoline_size = size_of::<TrampolineEpilogueFF>();
+        unsafe {
+            self.original_bytes.clear();
+            self.trampoline_size = size_of::<TrampolineEpilogueFF>();
 
-        let mut ip = self.target;
-        while ip < self.target.add(size_of::<JmpFF>()) {
-            let buffer = unsafe { std::slice::from_raw_parts(ip, 20) };
-            let ix = decode::<VisibleOperands>(buffer)?;
+            let mut ip = self.target;
+            while ip < self.target.add(size_of::<JmpFF>()) {
+                let buffer = std::slice::from_raw_parts(ip, 20);
+                let ix = decode::<VisibleOperands>(buffer)?;
 
-            // We can't support any instruction that is IP relative here because
-            // ff_hook should only be called if e9_hook failed indicating that
-            // we're likely outside the +- 2GB range.
-            if ix.attributes & zydis::InstructionAttributes::IS_RELATIVE
-                != zydis::InstructionAttributes::empty()
-            {
-                return Err(InlineError::IpRelativeInstructionOutOfRange);
+                // We can't support any instruction that is IP relative here because
+                // ff_hook should only be called if e9_hook failed indicating that
+                // we're likely outside the +- 2GB range.
+                if ix.attributes & zydis::InstructionAttributes::IS_RELATIVE
+                    != zydis::InstructionAttributes::empty()
+                {
+                    return Err(InlineError::IpRelativeInstructionOutOfRange);
+                }
+
+                self.original_bytes
+                    .extend_from_slice(&buffer[..ix.length as usize]);
+                self.trampoline_size += ix.length as usize;
+
+                ip = ip.add(ix.length as usize);
             }
 
-            self.original_bytes
-                .extend_from_slice(&buffer[..ix.length as usize]);
-            self.trampoline_size += ix.length as usize;
+            let trampoline_allocation = allocator.lock().unwrap().allocate(self.trampoline_size)?;
+            self.trampoline = Some(trampoline_allocation);
 
-            ip = ip.add(ix.length as usize);
+            std::ptr::copy_nonoverlapping(
+                self.original_bytes.as_ptr(),
+                self.trampoline.as_ref().unwrap().data(),
+                self.original_bytes.len(),
+            );
+
+            let trampoline_epilogue_ptr: *mut TrampolineEpilogueFF =
+                self.trampoline
+                    .as_ref()
+                    .unwrap()
+                    .data()
+                    .add(self.trampoline_size)
+                    .sub(size_of::<TrampolineEpilogueFF>()) as _;
+            let trampoline_epilogue = &mut *(trampoline_epilogue_ptr);
+
+            // jmp from trampoline to original.
+            let src: *mut u8 = addr_of_mut!(trampoline_epilogue.jmp_to_original) as _;
+            let dst: *const u8 = self.target.add(self.original_bytes.len());
+            let data: *mut u8 = addr_of_mut!(trampoline_epilogue.original_address) as _;
+
+            emit_jmp_ff(src, dst, data, None)?;
+
+            self.jmp_type = JmpType::FF;
+
+            Ok(())
         }
-
-        let trampoline_allocation = allocator.lock().unwrap().allocate(self.trampoline_size)?;
-        self.trampoline = Some(trampoline_allocation);
-
-        std::ptr::copy_nonoverlapping(
-            self.original_bytes.as_ptr(),
-            self.trampoline.as_ref().unwrap().data(),
-            self.original_bytes.len(),
-        );
-
-        let trampoline_epilogue_ptr: *mut TrampolineEpilogueFF =
-            self.trampoline
-                .as_ref()
-                .unwrap()
-                .data()
-                .add(self.trampoline_size)
-                .sub(size_of::<TrampolineEpilogueFF>()) as _;
-        let trampoline_epilogue = &mut *(trampoline_epilogue_ptr);
-
-        // jmp from trampoline to original.
-        let src: *mut u8 = addr_of_mut!(trampoline_epilogue.jmp_to_original) as _;
-        let dst: *const u8 = self.target.add(self.original_bytes.len());
-        let data: *mut u8 = addr_of_mut!(trampoline_epilogue.original_address) as _;
-
-        emit_jmp_ff(src, dst, data, None)?;
-
-        self.jmp_type = JmpType::FF;
-
-        Ok(())
     }
 }

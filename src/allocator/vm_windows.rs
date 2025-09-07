@@ -2,33 +2,33 @@ use std::{
     collections::HashMap,
     ffi::c_void,
     sync::{
-        atomic::{AtomicBool, Ordering},
         LazyLock, Mutex,
+        atomic::{AtomicBool, Ordering},
     },
 };
 
 use windows::{
-    core::PCSTR,
     Win32::{
         Foundation::{EXCEPTION_ACCESS_VIOLATION, FALSE},
         System::{
             Diagnostics::Debug::{
-                AddVectoredExceptionHandler, RemoveVectoredExceptionHandler, RtlPcToFileHeader,
-                CONTEXT, EXCEPTION_CONTINUE_EXECUTION, EXCEPTION_CONTINUE_SEARCH,
-                EXCEPTION_POINTERS, IMAGE_FILE_HEADER, IMAGE_SCN_MEM_EXECUTE,
-                IMAGE_SECTION_CHARACTERISTICS, IMAGE_SECTION_HEADER,
+                AddVectoredExceptionHandler, CONTEXT, EXCEPTION_CONTINUE_EXECUTION,
+                EXCEPTION_CONTINUE_SEARCH, EXCEPTION_POINTERS, IMAGE_FILE_HEADER,
+                IMAGE_SCN_MEM_EXECUTE, IMAGE_SECTION_CHARACTERISTICS, IMAGE_SECTION_HEADER,
+                RemoveVectoredExceptionHandler, RtlPcToFileHeader,
             },
             LibraryLoader::{GetModuleHandleA, GetProcAddress},
             Memory::{
-                IsBadReadPtr, IsBadWritePtr, VirtualAlloc, VirtualFree, VirtualProtect,
-                VirtualQuery, MEMORY_BASIC_INFORMATION, MEM_COMMIT, MEM_FREE, MEM_RELEASE,
-                MEM_RESERVE, PAGE_EXECUTE, PAGE_EXECUTE_READ, PAGE_EXECUTE_READWRITE,
-                PAGE_PROTECTION_FLAGS, PAGE_READONLY, PAGE_READWRITE,
+                IsBadReadPtr, IsBadWritePtr, MEM_COMMIT, MEM_FREE, MEM_RELEASE, MEM_RESERVE,
+                MEMORY_BASIC_INFORMATION, PAGE_EXECUTE, PAGE_EXECUTE_READ, PAGE_EXECUTE_READWRITE,
+                PAGE_PROTECTION_FLAGS, PAGE_READONLY, PAGE_READWRITE, VirtualAlloc, VirtualFree,
+                VirtualProtect, VirtualQuery,
             },
             SystemInformation::{GetSystemInfo, SYSTEM_INFO},
             SystemServices::{IMAGE_DOS_HEADER, IMAGE_DOS_SIGNATURE, IMAGE_NT_SIGNATURE},
         },
     },
+    core::PCSTR,
 };
 
 use crate::utility;
@@ -185,70 +185,72 @@ impl VM {
     where
         F: FnMut(),
     {
-        let mut find_me_mbi = MEMORY_BASIC_INFORMATION::default();
-        let mut from_mbi = MEMORY_BASIC_INFORMATION::default();
-        let mut to_mbi = MEMORY_BASIC_INFORMATION::default();
+        unsafe {
+            let mut find_me_mbi = MEMORY_BASIC_INFORMATION::default();
+            let mut from_mbi = MEMORY_BASIC_INFORMATION::default();
+            let mut to_mbi = MEMORY_BASIC_INFORMATION::default();
 
-        VirtualQuery(
-            Some(find_me as *const c_void),
-            &mut find_me_mbi,
-            size_of::<MEMORY_BASIC_INFORMATION>(),
-        );
-        VirtualQuery(
-            Some(from as *const c_void),
-            &mut from_mbi,
-            size_of::<MEMORY_BASIC_INFORMATION>(),
-        );
-        VirtualQuery(
-            Some(to as *const c_void),
-            &mut to_mbi,
-            size_of::<MEMORY_BASIC_INFORMATION>(),
-        );
+            VirtualQuery(
+                Some(find_me as *const c_void),
+                &mut find_me_mbi,
+                size_of::<MEMORY_BASIC_INFORMATION>(),
+            );
+            VirtualQuery(
+                Some(from as *const c_void),
+                &mut from_mbi,
+                size_of::<MEMORY_BASIC_INFORMATION>(),
+            );
+            VirtualQuery(
+                Some(to as *const c_void),
+                &mut to_mbi,
+                size_of::<MEMORY_BASIC_INFORMATION>(),
+            );
 
-        let mut new_protect = PAGE_READWRITE;
-        if from_mbi.AllocationBase == find_me_mbi.AllocationBase
-            || to_mbi.AllocationBase == find_me_mbi.AllocationBase
-        {
-            new_protect = PAGE_EXECUTE_READWRITE;
-        }
-
-        // Fix LoadLibraryExW hooking crash
-        let system_info = VM::system_info();
-        let from_page_start = utility::align_down_ptr(from, system_info.page_size as usize);
-        let from_page_end =
-            utility::align_up_ptr(from.wrapping_add(len), system_info.page_size as usize);
-        let vp_start = get_proc_address("kernel32.dll", "VirtualProtect");
-        if let Some(vp_start) = vp_start {
-            let vp_end = vp_start.wrapping_add(0x20);
-
-            if !(from_page_end < vp_start || vp_end < from_page_start) {
+            let mut new_protect = PAGE_READWRITE;
+            if from_mbi.AllocationBase == find_me_mbi.AllocationBase
+                || to_mbi.AllocationBase == find_me_mbi.AllocationBase
+            {
                 new_protect = PAGE_EXECUTE_READWRITE;
             }
-        } else {
-            log::warn!("Failed to get VirtualProtect address");
+
+            // Fix LoadLibraryExW hooking crash
+            let system_info = VM::system_info();
+            let from_page_start = utility::align_down_ptr(from, system_info.page_size as usize);
+            let from_page_end =
+                utility::align_up_ptr(from.wrapping_add(len), system_info.page_size as usize);
+            let vp_start = get_proc_address("kernel32.dll", "VirtualProtect");
+            if let Some(vp_start) = vp_start {
+                let vp_end = vp_start.wrapping_add(0x20);
+
+                if !(from_page_end < vp_start || vp_end < from_page_start) {
+                    new_protect = PAGE_EXECUTE_READWRITE;
+                }
+            } else {
+                log::warn!("Failed to get VirtualProtect address");
+            }
+
+            if !TRAP_MANAGER_DESTRUCTED.load(Ordering::SeqCst) {
+                // not destructed
+                let mut trap_manager = TrapManager::instance().lock().unwrap();
+                trap_manager.add_trap(from, to, len);
+            }
+
+            // Make sure we aren't working on a different address in the same memory page on a different thread.
+            let _lock = VIRTUAL_PROTECT_MUTEX.lock().unwrap();
+
+            let mut from_protect = PAGE_PROTECTION_FLAGS::default();
+            let mut to_protect = PAGE_PROTECTION_FLAGS::default();
+
+            let _ = VirtualProtect(from as _, len, new_protect, &mut from_protect);
+            let _ = VirtualProtect(to as _, len, new_protect, &mut to_protect);
+
+            if let Some(mut run_fn) = run_fn {
+                run_fn();
+            }
+
+            let _ = VirtualProtect(to as _, len, to_protect, &mut to_protect);
+            let _ = VirtualProtect(from as _, len, from_protect, &mut from_protect);
         }
-
-        if !TRAP_MANAGER_DESTRUCTED.load(Ordering::SeqCst) {
-            // not destructed
-            let mut trap_manager = TrapManager::instance().lock().unwrap();
-            trap_manager.add_trap(from, to, len);
-        }
-
-        // Make sure we aren't working on a different address in the same memory page on a different thread.
-        let _lock = VIRTUAL_PROTECT_MUTEX.lock().unwrap();
-
-        let mut from_protect = PAGE_PROTECTION_FLAGS::default();
-        let mut to_protect = PAGE_PROTECTION_FLAGS::default();
-
-        let _ = VirtualProtect(from as _, len, new_protect, &mut from_protect);
-        let _ = VirtualProtect(to as _, len, new_protect, &mut to_protect);
-
-        if let Some(mut run_fn) = run_fn {
-            run_fn();
-        }
-
-        let _ = VirtualProtect(to as _, len, to_protect, &mut to_protect);
-        let _ = VirtualProtect(from as _, len, from_protect, &mut from_protect);
     }
 }
 
@@ -289,7 +291,7 @@ impl TrapManager {
     unsafe fn new() -> Self {
         Self {
             traps: HashMap::new(),
-            trap_veh: AddVectoredExceptionHandler(1, Some(trap_handler)),
+            trap_veh: unsafe { AddVectoredExceptionHandler(1, Some(trap_handler)) },
         }
     }
 
@@ -344,34 +346,36 @@ impl TrapManager {
 }
 
 unsafe extern "system" fn trap_handler(exceptioninfo: *mut EXCEPTION_POINTERS) -> i32 {
-    let exp = exceptioninfo.as_ref().unwrap();
-    let exception_code = exp.ExceptionRecord.as_ref().unwrap().ExceptionCode;
+    unsafe {
+        let exp = exceptioninfo.as_ref().unwrap();
+        let exception_code = exp.ExceptionRecord.as_ref().unwrap().ExceptionCode;
 
-    if exception_code != EXCEPTION_ACCESS_VIOLATION {
-        return EXCEPTION_CONTINUE_SEARCH;
-    }
-
-    let trap_manager = TrapManager::instance().lock().unwrap();
-    let faulting_address =
-        exp.ExceptionRecord.as_ref().unwrap().ExceptionInformation[1] as *const u8;
-    let trap = trap_manager.find_trap(faulting_address);
-
-    if trap.is_none() {
-        if trap_manager.find_trap_page(faulting_address).is_some() {
-            return EXCEPTION_CONTINUE_EXECUTION;
-        } else {
+        if exception_code != EXCEPTION_ACCESS_VIOLATION {
             return EXCEPTION_CONTINUE_SEARCH;
         }
+
+        let trap_manager = TrapManager::instance().lock().unwrap();
+        let faulting_address =
+            exp.ExceptionRecord.as_ref().unwrap().ExceptionInformation[1] as *const u8;
+        let trap = trap_manager.find_trap(faulting_address);
+
+        if trap.is_none() {
+            if trap_manager.find_trap_page(faulting_address).is_some() {
+                return EXCEPTION_CONTINUE_EXECUTION;
+            } else {
+                return EXCEPTION_CONTINUE_SEARCH;
+            }
+        }
+        let trap = trap.unwrap();
+
+        let ctx = exp.ContextRecord;
+
+        for i in 0..trap.len {
+            fix_ip(ctx, trap.from.add(i), trap.to.add(i));
+        }
+
+        EXCEPTION_CONTINUE_EXECUTION
     }
-    let trap = trap.unwrap();
-
-    let ctx = exp.ContextRecord;
-
-    for i in 0..trap.len {
-        fix_ip(ctx, trap.from.add(i), trap.to.add(i));
-    }
-
-    EXCEPTION_CONTINUE_EXECUTION
 }
 
 // IMAGE_FIRST_SECTION implementation
@@ -387,13 +391,15 @@ unsafe fn image_first_section(nt_header: &IMAGE_NT_HEADERS) -> *mut IMAGE_SECTIO
 
 #[cfg(target_arch = "x86_64")]
 unsafe fn fix_ip(ctx: *mut CONTEXT, old_ip: *const u8, new_ip: *const u8) {
-    let mut ip = ctx.as_mut().unwrap().Rip as usize;
+    unsafe {
+        let mut ip = ctx.as_mut().unwrap().Rip as usize;
 
-    if ip == old_ip as usize {
-        ip = new_ip as usize;
+        if ip == old_ip as usize {
+            ip = new_ip as usize;
+        }
+
+        ctx.as_mut().unwrap().Rip = ip as u64;
     }
-
-    ctx.as_mut().unwrap().Rip = ip as u64;
 }
 
 #[cfg(target_arch = "x86")]
@@ -408,12 +414,14 @@ unsafe fn fix_ip(ctx: *mut CONTEXT, old_ip: *const u8, new_ip: *const u8) {
 }
 
 unsafe fn get_proc_address(module: &str, name: &str) -> Option<*const u8> {
-    let module_name = utility::to_null_terminated_string(module);
-    let module = GetModuleHandleA(PCSTR::from_raw(module_name.as_ptr())).ok()?;
-    let name = utility::to_null_terminated_string(name);
-    let proc = GetProcAddress(module, PCSTR::from_raw(name.as_ptr()))?;
+    unsafe {
+        let module_name = utility::to_null_terminated_string(module);
+        let module = GetModuleHandleA(PCSTR::from_raw(module_name.as_ptr())).ok()?;
+        let name = utility::to_null_terminated_string(name);
+        let proc = GetProcAddress(module, PCSTR::from_raw(name.as_ptr()))?;
 
-    Some(std::mem::transmute(proc))
+        Some(std::mem::transmute(proc))
+    }
 }
 
 #[inline(never)]

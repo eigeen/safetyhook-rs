@@ -17,7 +17,7 @@ pub unsafe fn create_inline(
     target: *mut c_void,
     dest: *mut c_void,
 ) -> Result<InlineHook, inline_hook::InlineError> {
-    InlineHook::new(target as _, dest as _, inline_hook::Flags::Default)
+    unsafe { InlineHook::new(target as _, dest as _, inline_hook::Flags::Default) }
 }
 
 /// Create a new mid hook, and enable after craetion.
@@ -27,5 +27,5 @@ pub unsafe fn create_mid(
     target: *mut c_void,
     dest: mid_hook::MidHookFn,
 ) -> Result<MidHook, mid_hook::MidError> {
-    MidHook::new(target as _, dest, mid_hook::Flags::Default)
+    unsafe { MidHook::new(target as _, dest, mid_hook::Flags::Default) }
 }

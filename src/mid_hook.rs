@@ -107,10 +107,17 @@ impl MidHookBuilder {
             Flags::StartDisabled
         };
 
-        if let Some(allocator) = self.allocator.clone() {
-            MidHook::new_with_allocator(allocator, self.target, self.destination.unwrap(), flags)
-        } else {
-            MidHook::new(self.target, self.destination.unwrap(), flags)
+        unsafe {
+            if let Some(allocator) = self.allocator.clone() {
+                MidHook::new_with_allocator(
+                    allocator,
+                    self.target,
+                    self.destination.unwrap(),
+                    flags,
+                )
+            } else {
+                MidHook::new(self.target, self.destination.unwrap(), flags)
+            }
         }
     }
 }
@@ -131,7 +138,7 @@ impl MidHook {
         destination: MidHookFn,
         flags: Flags,
     ) -> Result<Self, MidError> {
-        Self::new_with_allocator(Allocator::global(), target, destination, flags)
+        unsafe { Self::new_with_allocator(Allocator::global(), target, destination, flags) }
     }
 
     /// Create a inline hook with a custom allocator.
@@ -148,7 +155,9 @@ impl MidHook {
             destination,
         };
 
-        this.setup(allocator)?;
+        unsafe {
+            this.setup(allocator)?;
+        }
 
         if flags != Flags::StartDisabled {
             this.enable()?;
@@ -189,54 +198,56 @@ impl MidHook {
 
     /// Initialize hook.
     pub unsafe fn setup(&mut self, allocator: SharedAllocator) -> Result<(), MidError> {
-        self.stub
-            .data()
-            .copy_from_nonoverlapping(asm::ASM_DATA.as_ptr(), asm::ASM_DATA.len());
+        unsafe {
+            self.stub
+                .data()
+                .copy_from_nonoverlapping(asm::ASM_DATA.as_ptr(), asm::ASM_DATA.len());
 
-        if cfg!(target_arch = "x86_64") {
-            utility::store(
-                self.stub.data().add(asm::ASM_DATA.len()).sub(16),
-                self.destination,
-            );
-        } else {
-            utility::store(
-                self.stub.data().add(asm::ASM_DATA.len()).sub(8),
-                self.destination,
-            );
+            if cfg!(target_arch = "x86_64") {
+                utility::store(
+                    self.stub.data().add(asm::ASM_DATA.len()).sub(16),
+                    self.destination,
+                );
+            } else {
+                utility::store(
+                    self.stub.data().add(asm::ASM_DATA.len()).sub(8),
+                    self.destination,
+                );
 
-            // 32-bit has some relocations we need to fix up as well.
-            utility::store(
-                self.stub.data().add(0x02),
-                self.stub.data().add(self.stub.size() - 4),
-            );
-            utility::store(
-                self.stub.data().add(0x59),
-                self.stub.data().add(self.stub.size() - 8),
-            );
+                // 32-bit has some relocations we need to fix up as well.
+                utility::store(
+                    self.stub.data().add(0x02),
+                    self.stub.data().add(self.stub.size() - 4),
+                );
+                utility::store(
+                    self.stub.data().add(0x59),
+                    self.stub.data().add(self.stub.size() - 8),
+                );
+            }
+
+            let hook = InlineHook::new_with_allocator(
+                allocator,
+                self.target,
+                self.stub.data(),
+                inline_hook::Flags::StartDisabled,
+            )?;
+            self.hook = Some(hook);
+
+            let trampoline_data = self.hook.as_ref().unwrap().trampoline().unwrap().data();
+            if cfg!(target_arch = "x86_64") {
+                utility::store(
+                    self.stub.data().add(asm::ASM_DATA.len()).sub(8),
+                    trampoline_data,
+                );
+            } else {
+                utility::store(
+                    self.stub.data().add(asm::ASM_DATA.len()).sub(4),
+                    trampoline_data,
+                );
+            }
+
+            Ok(())
         }
-
-        let hook = InlineHook::new_with_allocator(
-            allocator,
-            self.target,
-            self.stub.data(),
-            inline_hook::Flags::StartDisabled,
-        )?;
-        self.hook = Some(hook);
-
-        let trampoline_data = self.hook.as_ref().unwrap().trampoline().unwrap().data();
-        if cfg!(target_arch = "x86_64") {
-            utility::store(
-                self.stub.data().add(asm::ASM_DATA.len()).sub(8),
-                trampoline_data,
-            );
-        } else {
-            utility::store(
-                self.stub.data().add(asm::ASM_DATA.len()).sub(4),
-                trampoline_data,
-            );
-        }
-
-        Ok(())
     }
 
     /// Enable hook.
