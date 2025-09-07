@@ -128,6 +128,11 @@ impl Allocator {
     ) -> Result<Allocation> {
         let mut inner = self.inner.lock().unwrap();
 
+        // Align to 2 bytes to pass MFP virtual method check
+        // See https://itanium-cxx-abi.github.io/cxx-abi/abi.html#member-function-pointers
+        let size = utility::align_up(size, 2);
+
+        // First search through our list of allocations for a free block that is large enough.
         let max_distance = max_distance.unwrap_or(usize::MAX);
         for allocation in inner.memory.iter_mut() {
             if allocation.size < size {
