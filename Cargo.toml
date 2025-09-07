@@ -1,6 +1,6 @@
 [package]
 name = "safetyhook"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2021"
 
 [dependencies]
@@ -13,6 +13,7 @@ windows = { version = "0.58", features = [
     "Win32_System_Diagnostics_Debug",
     "Win32_System_SystemInformation",
     "Win32_System_Kernel",
+    "Win32_System_LibraryLoader"
 ] }
 zydis = "4.1.1"
 

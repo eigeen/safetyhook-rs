@@ -4,23 +4,27 @@ use std::{
     sync::{LazyLock, Mutex},
 };
 
-use windows::Win32::{
-    Foundation::{EXCEPTION_ACCESS_VIOLATION, FALSE},
-    System::{
-        Diagnostics::Debug::{
-            AddVectoredExceptionHandler, RemoveVectoredExceptionHandler, RtlPcToFileHeader,
-            CONTEXT, EXCEPTION_CONTINUE_EXECUTION, EXCEPTION_CONTINUE_SEARCH, EXCEPTION_POINTERS,
-            IMAGE_FILE_HEADER, IMAGE_SCN_MEM_EXECUTE, IMAGE_SECTION_CHARACTERISTICS,
-            IMAGE_SECTION_HEADER,
+use windows::{
+    core::PCSTR,
+    Win32::{
+        Foundation::{EXCEPTION_ACCESS_VIOLATION, FALSE},
+        System::{
+            Diagnostics::Debug::{
+                AddVectoredExceptionHandler, RemoveVectoredExceptionHandler, RtlPcToFileHeader,
+                CONTEXT, EXCEPTION_CONTINUE_EXECUTION, EXCEPTION_CONTINUE_SEARCH,
+                EXCEPTION_POINTERS, IMAGE_FILE_HEADER, IMAGE_SCN_MEM_EXECUTE,
+                IMAGE_SECTION_CHARACTERISTICS, IMAGE_SECTION_HEADER,
+            },
+            LibraryLoader::{GetModuleHandleA, GetProcAddress},
+            Memory::{
+                IsBadReadPtr, IsBadWritePtr, VirtualAlloc, VirtualFree, VirtualProtect,
+                VirtualQuery, MEMORY_BASIC_INFORMATION, MEM_COMMIT, MEM_FREE, MEM_RELEASE,
+                MEM_RESERVE, PAGE_EXECUTE, PAGE_EXECUTE_READ, PAGE_EXECUTE_READWRITE,
+                PAGE_PROTECTION_FLAGS, PAGE_READONLY, PAGE_READWRITE,
+            },
+            SystemInformation::{GetSystemInfo, SYSTEM_INFO},
+            SystemServices::{IMAGE_DOS_HEADER, IMAGE_DOS_SIGNATURE, IMAGE_NT_SIGNATURE},
         },
-        Memory::{
-            IsBadReadPtr, IsBadWritePtr, VirtualAlloc, VirtualFree, VirtualProtect, VirtualQuery,
-            MEMORY_BASIC_INFORMATION, MEM_COMMIT, MEM_FREE, MEM_RELEASE, MEM_RESERVE, PAGE_EXECUTE,
-            PAGE_EXECUTE_READ, PAGE_EXECUTE_READWRITE, PAGE_PROTECTION_FLAGS, PAGE_READONLY,
-            PAGE_READWRITE,
-        },
-        SystemInformation::{GetSystemInfo, SYSTEM_INFO},
-        SystemServices::{IMAGE_DOS_HEADER, IMAGE_DOS_SIGNATURE, IMAGE_NT_SIGNATURE},
     },
 };
 
@@ -205,6 +209,22 @@ impl VM {
             new_protect = PAGE_EXECUTE_READWRITE;
         }
 
+        // Fix LoadLibraryExW hooking crash
+        let system_info = VM::system_info();
+        let from_page_start = utility::align_down_ptr(from, system_info.page_size as usize);
+        let from_page_end =
+            utility::align_up_ptr(from.wrapping_add(len), system_info.page_size as usize);
+        let vp_start = get_proc_address("kernel32.dll", "VirtualProtect");
+        if let Some(vp_start) = vp_start {
+            let vp_end = vp_start.wrapping_add(0x20);
+
+            if !(from_page_end < vp_start || vp_end < from_page_start) {
+                new_protect = PAGE_EXECUTE_READWRITE;
+            }
+        } else {
+            log::warn!("Failed to get VirtualProtect address");
+        }
+
         let mut trap_manager = TrapManager::instance().lock().unwrap();
         trap_manager.add_trap(from, to, len);
 
@@ -373,6 +393,15 @@ unsafe fn fix_ip(ctx: *mut CONTEXT, old_ip: *const u8, new_ip: *const u8) {
     }
 
     ctx.as_mut().unwrap().Eip = ip as u32;
+}
+
+unsafe fn get_proc_address(module: &str, name: &str) -> Option<*const u8> {
+    let module_name = utility::to_null_terminated_string(module);
+    let module = GetModuleHandleA(PCSTR::from_raw(module_name.as_ptr())).ok()?;
+    let name = utility::to_null_terminated_string(name);
+    let proc = GetProcAddress(module, PCSTR::from_raw(name.as_ptr()))?;
+
+    Some(std::mem::transmute(proc))
 }
 
 #[inline(never)]
